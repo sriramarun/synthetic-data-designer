@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Generated datasets — never commit these
+out/
+out_*/
+*.parquet
+*.csv
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.parquet
+
+.DS_Store
+.idea/
+.vscode/

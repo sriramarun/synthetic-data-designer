@@ -1,0 +1,350 @@
+"""Load, validate, and cross-check a design spec.
+
+:mod:`sdd.spec.schema` validates each section in isolation — a transition row
+sums to 1, a bucket has the right number of labels. This module validates the
+spec *as a whole*: every name a derivation or dynamic mentions must actually
+exist, and derivations must be orderable (no column defined in terms of itself).
+
+Catching these at load time matters because the alternative is a ``KeyError``
+thrown twenty minutes into a 500k-row run.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from sdd.generate.deriver import expression_names
+from sdd.spec.schema import DesignSpec, DwellTimeHazard
+
+
+class SpecError(ValueError):
+    """A spec that parsed but does not hang together."""
+
+
+def load_spec(path: str | Path) -> DesignSpec:
+    """Read a spec from a YAML or JSON file and fully validate it."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    raw = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        raise SpecError(f"{path} does not contain a spec mapping at the top level")
+    return load_spec_dict(raw, source=str(path))
+
+
+def load_spec_dict(raw: dict[str, Any], *, source: str | None = None) -> DesignSpec:
+    """Validate an already-parsed spec mapping (the UI/API path).
+
+    Callers get :class:`SpecError` whatever went wrong — a field-level pydantic
+    failure or a cross-reference one — so there is a single exception type to
+    catch and show to a user.
+    """
+    where = f"{source} is not a valid design spec" if source else "invalid design spec"
+    try:
+        spec = DesignSpec.model_validate(raw)
+    except SpecError:
+        raise
+    except Exception as exc:  # pydantic ValidationError
+        raise SpecError(f"{where}:\n{exc}") from exc
+    check_spec(spec)
+    return spec
+
+
+def dump_spec(spec: DesignSpec, path: str | Path, *, header: str | None = None) -> Path:
+    """Write a spec to YAML, preserving declaration order and dropping defaults."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(
+        spec.model_dump(mode="json", exclude_none=True, by_alias=True),
+        sort_keys=False,
+        allow_unicode=True,
+        width=100,
+    )
+    path.write_text((f"{header}\n{body}" if header else body), encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# whole-spec checks
+# ---------------------------------------------------------------------------
+
+
+def check_spec(spec: DesignSpec) -> None:
+    """Raise :class:`SpecError` if the spec does not hang together.
+
+    Collects *all* problems before raising, so one run surfaces every issue
+    rather than making the author fix them one at a time.
+    """
+    problems: list[str] = []
+    problems += _check_references(spec)
+    problems += _check_derivation_order(spec)
+    problems += _check_lifecycle_wiring(spec)
+    problems += _check_emit(spec)
+
+    if problems:
+        bullets = "\n".join(f"  - {p}" for p in problems)
+        raise SpecError(f"spec {spec.meta.name!r} has {len(problems)} problem(s):\n{bullets}")
+
+
+def _known_names(spec: DesignSpec) -> set[str]:
+    """Every name an expression may legally reference."""
+    return (
+        set(spec.column_names)
+        | set(spec.constants)
+        | set(spec.params)
+        | {d.target for d in spec.derivations}
+        | {c.column for c in spec.dynamics.counters}
+        | {a.column for a in spec.dynamics.accruals}
+    )
+
+
+def _check_references(spec: DesignSpec) -> list[str]:
+    problems: list[str] = []
+    known = _known_names(spec)
+
+    def require(name: str | None, where: str) -> None:
+        if name and name not in known:
+            problems.append(f"{where} references unknown column {name!r}")
+
+    require(spec.entity.id_column, "entity.id_column")
+    require(spec.entity.time_column, "entity.time_column")
+
+    for col in spec.columns:
+        gen = col.generator
+        if gen is not None and gen.kind == "conditional_categorical":
+            require(gen.parent, f"column {col.name!r} generator")
+
+    for d in spec.derivations:
+        where = f"derivation {d.target!r}"
+        if d.kind == "expr" and d.expr:
+            for name in expression_names(d.expr):
+                if name not in known:
+                    problems.append(f"{where} expression references unknown name {name!r}")
+        if d.kind == "when":
+            for rule in d.rules or []:
+                for name in expression_names(rule.if_):
+                    if name not in known:
+                        problems.append(f"{where} condition references unknown name {name!r}")
+        if d.kind == "bucket":
+            require(d.source, where)
+            if d.bucket and d.bucket not in spec.buckets:
+                problems.append(
+                    f"{where} uses bucket {d.bucket!r}, which is not defined under `buckets` "
+                    f"(defined: {sorted(spec.buckets)})"
+                )
+        if d.kind == "format":
+            for arg_expr in d.args.values():
+                for name in expression_names(arg_expr):
+                    if name not in known:
+                        problems.append(f"{where} argument references unknown name {name!r}")
+
+    lc = spec.lifecycle
+    if lc:
+        require(lc.state_column, "lifecycle.state_column")
+        for state, fields in lc.state_fields.items():
+            for name in fields:
+                require(name, f"lifecycle.state_fields[{state!r}]")
+
+    dyn = spec.dynamics
+    if dyn.amortisation:
+        am = dyn.amortisation
+        require(am.balance, "dynamics.amortisation.balance")
+        require(am.rate, "dynamics.amortisation.rate")
+        require(am.payment, "dynamics.amortisation.payment")
+        require(am.term, "dynamics.amortisation.term")
+        if am.flat_when:
+            for name in expression_names(am.flat_when):
+                if name not in known:
+                    problems.append(
+                        f"dynamics.amortisation.flat_when references unknown name {name!r}"
+                    )
+
+    for idx in dyn.indices:
+        for name in idx.applies_to:
+            require(name, f"dynamics.indices[{idx.name!r}].applies_to")
+
+    for ctr in dyn.counters:
+        require(ctr.column, "dynamics.counters")
+        if ctr.expr:
+            for name in expression_names(ctr.expr):
+                if name not in known:
+                    problems.append(f"counter {ctr.column!r} references unknown name {name!r}")
+
+    for acc in dyn.accruals:
+        require(acc.column, "dynamics.accruals")
+        # `add` may be a column name or a bare number.
+        if not _is_number(acc.add):
+            require(acc.add, f"dynamics.accruals[{acc.column!r}].add")
+
+    for sc in spec.scenarios.values():
+        for name in sc.rate_columns:
+            require(name, f"scenarios[{sc.name!r}].rate_columns")
+        index_names = {i.name for i in dyn.indices}
+        for name in sc.index_shift:
+            if name not in index_names:
+                problems.append(
+                    f"scenario {sc.name!r} shifts unknown index {name!r} "
+                    f"(defined: {sorted(index_names)})"
+                )
+
+    for name in spec.validation.non_negative_columns:
+        require(name, "validation.non_negative_columns")
+
+    return problems
+
+
+def _is_number(value: str) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _check_derivation_order(spec: DesignSpec) -> list[str]:
+    """Derivations run top to bottom, so each must only use already-available names.
+
+    This also catches self-reference (``x = x + 1``), which is a cycle in the
+    book stage even though it is legitimate for a per-period counter.
+    """
+    problems: list[str] = []
+    # Lifecycle state_fields are applied before derivations run (both at period 0
+    # and in every ageing step), so the columns they set are already available.
+    from_state_fields = {
+        col
+        for fields in (spec.lifecycle.state_fields.values() if spec.lifecycle else [])
+        for col in fields
+    }
+    sampled = (
+        {c.name for c in spec.columns if c.role != "derived"}
+        | set(spec.constants)
+        | set(spec.params)
+        | from_state_fields
+    )
+    # Per-period derivations may reference anything the ageing engine maintains.
+    period_available = (
+        sampled
+        | {d.target for d in spec.derivations}
+        | {c.column for c in spec.dynamics.counters}
+        | {a.column for a in spec.dynamics.accruals}
+    )
+
+    available = set(sampled)
+    for i, d in enumerate(spec.derivations):
+        refs: set[str] = set()
+        if d.kind == "expr" and d.expr:
+            refs = expression_names(d.expr)
+        elif d.kind == "when":
+            for rule in d.rules or []:
+                refs |= expression_names(rule.if_)
+        elif d.kind == "bucket" and d.source:
+            refs = {d.source}
+        elif d.kind == "format":
+            for arg_expr in d.args.values():
+                refs |= expression_names(arg_expr)
+
+        pool = period_available if d.stage == "period" else available
+        missing = sorted(r for r in refs if r not in pool)
+        if missing:
+            problems.append(
+                f"derivation #{i} ({d.target!r}, stage={d.stage}) uses {missing} before "
+                "they are available — move it after the derivation that produces them, "
+                "or set stage: period if it should run during ageing"
+            )
+        if d.target in refs and d.stage == "book":
+            problems.append(
+                f"derivation {d.target!r} is defined in terms of itself; that only works "
+                "for per-period updates (use `dynamics.counters` or stage: period)"
+            )
+        available.add(d.target)
+
+    return problems
+
+
+def _check_lifecycle_wiring(spec: DesignSpec) -> list[str]:
+    problems: list[str] = []
+    lc = spec.lifecycle
+    if lc is None:
+        if spec.dynamics.amortisation and spec.dynamics.amortisation.only_when_state:
+            problems.append(
+                "dynamics.amortisation.only_when_state is set but the spec has no `lifecycle` "
+                "section defining states"
+            )
+        return problems
+
+    states = set(lc.states)
+
+    am = spec.dynamics.amortisation
+    if am and am.only_when_state:
+        wanted = [am.only_when_state] if isinstance(am.only_when_state, str) else am.only_when_state
+        unknown = sorted(set(wanted) - states)
+        if unknown:
+            problems.append(
+                f"dynamics.amortisation.only_when_state names unknown states: {unknown}"
+            )
+
+    for acc in spec.dynamics.accruals:
+        for label, group in (("states", acc.states), ("reset_states", acc.reset_states)):
+            unknown = sorted(set(group or []) - states)
+            if unknown:
+                problems.append(f"accrual {acc.column!r} {label} names unknown states: {unknown}")
+        if acc.performing_state and acc.performing_state not in states:
+            problems.append(
+                f"accrual {acc.column!r} performing_state {acc.performing_state!r} is not a "
+                "lifecycle state"
+            )
+
+    # A state reachable only via a hazard needs no matrix column, but a state
+    # that is neither in the matrix nor any hazard target is unreachable.
+    reachable = set(lc.resolved_transition_states)
+    for hz in lc.hazards:
+        reachable.add(hz.to_state)
+    orphans = sorted(states - reachable)
+    if orphans:
+        problems.append(
+            f"states {orphans} can never be reached: they are not in transition_states and no "
+            "hazard targets them"
+        )
+
+    for hz in lc.hazards:
+        if isinstance(hz, DwellTimeHazard) and hz.from_state in lc.terminal:
+            problems.append(
+                f"hazard {hz.name!r} counts dwell time in {hz.from_state!r}, but that state is "
+                "terminal so entities leave the pool immediately and can never dwell there"
+            )
+
+    if lc.transitions is None and not lc.hazards:
+        problems.append(
+            "lifecycle defines states but neither a transition matrix nor any hazards, "
+            "so nothing would ever change state"
+        )
+
+    return problems
+
+
+def _check_emit(spec: DesignSpec) -> list[str]:
+    problems: list[str] = []
+    if spec.emit.column_order:
+        produced = (
+            set(spec.column_names)
+            | set(spec.constants)
+            | {d.target for d in spec.derivations}
+            | {c.column for c in spec.dynamics.counters}
+            | {a.column for a in spec.dynamics.accruals}
+        )
+        missing = [c for c in spec.emit.column_order if c not in produced]
+        if missing:
+            problems.append(
+                f"emit.column_order lists {len(missing)} column(s) nothing produces: {missing[:10]}"
+                + (" ..." if len(missing) > 10 else "")
+            )
+        helpers = set(spec.helper_columns) & set(spec.emit.column_order)
+        if helpers:
+            problems.append(
+                f"emit.column_order includes helper column(s) {sorted(helpers)}; helpers are "
+                "intermediates and are dropped before output"
+            )
+    return problems
