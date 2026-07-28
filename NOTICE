@@ -16,3 +16,9 @@ declarative re-expression of the hardcoded Python in
 
 The generalised engine, spec format, profiler, and validation layers in `src/sdd/`
 are original work.
+
+The test fixture `tests/fixtures/cre_taxonomy.json` is the ESMA Annex 3
+commercial-real-estate field taxonomy as extracted by the deeploans ETL
+pipelines, with the long regulatory prose removed to keep the fixture small.
+It is used to exercise the structure parser against genuine regulatory
+metadata.

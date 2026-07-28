@@ -20,6 +20,7 @@ out_*/
 *.csv
 !tests/fixtures/**/*.csv
 !tests/fixtures/**/*.parquet
+!tests/fixtures/**/*.json
 
 .DS_Store
 .idea/
