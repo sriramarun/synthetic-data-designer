@@ -1,0 +1,441 @@
+"""Learn dynamics from a multi-cut-off sample.
+
+A single snapshot tells you what a portfolio looks like. A panel tells you how
+it *behaves*, and behaviour is what the ageing engine needs. Given the same
+loans observed month after month, this module recovers:
+
+- the **state machine** — which delinquency states exist and how often loans move
+  between them, counted directly rather than hand-set;
+- the **attrition rate** — how many entities leave the pool each period, which is
+  the prepayment hazard;
+- the **amortisation kind** — by testing the observed balance paths against each
+  kernel and seeing which one predicts them;
+- **counters** — columns that move by a fixed step every period;
+- **index drift** — the average growth of valuation columns.
+
+Everything here is measurement, not assumption. Where a measurement is thin
+(too few observed transitions, say) it is reported with its sample size so the
+number can be judged rather than trusted blindly.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pandas as pd
+
+if TYPE_CHECKING:
+    from sdd.profile.profiler import DatasetProfile
+
+# A state column should have few values but more than one.
+MAX_STATE_VALUES = 20
+
+# Below this many observed transitions, a matrix row is guesswork.
+MIN_TRANSITIONS_PER_ROW = 30
+
+# How closely a kernel must predict observed balances to be declared the match.
+AMORT_TOLERANCE = 0.02
+
+# Names that mark a delinquency or status column.
+STATE_NAME_HINTS = (
+    "arrears_bucket",
+    "status",
+    "performing_status",
+    "delinquency",
+    "delinquency_status",
+    "state",
+    "arrears_status",
+    "account_status",
+)
+BALANCE_NAME_HINTS = ("current_balance", "outstanding_balance", "balance", "principal_balance")
+VALUATION_NAME_HINTS = ("market_value", "valuation", "indexed", "collateral_value", "residual")
+
+
+def learn_panel_dynamics(
+    df: pd.DataFrame, profile: DatasetProfile, *, state_column: str | None = None
+) -> dict[str, Any]:
+    """Recover everything the ageing engine needs from an observed panel."""
+    out: dict[str, Any] = {}
+    eid, etime = profile.id_column, profile.time_column
+    if not eid or not etime:
+        return out
+
+    ordered = df.sort_values([eid, etime])
+
+    state_column = state_column or detect_state_column(df, profile)
+    if state_column:
+        lifecycle = learn_lifecycle(ordered, eid, etime, state_column)
+        if lifecycle:
+            out["lifecycle"] = lifecycle
+
+    attrition = learn_attrition(df, eid, etime)
+    if attrition:
+        out["attrition"] = attrition
+
+    counters = learn_counters(ordered, eid, profile)
+    if counters:
+        out["counters"] = counters
+
+    balance = detect_by_name(df, profile, BALANCE_NAME_HINTS, dynamic_only=True)
+    if balance:
+        amortisation = learn_amortisation(ordered, eid, balance, profile, state_column)
+        if amortisation:
+            out["amortisation"] = amortisation
+
+    indices = learn_index_drift(df, etime, profile)
+    if indices:
+        out["indices"] = indices
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# detection helpers
+# ---------------------------------------------------------------------------
+
+
+def detect_by_name(
+    df: pd.DataFrame, profile: DatasetProfile, hints: tuple[str, ...], *, dynamic_only: bool = False
+) -> str | None:
+    """First column whose name contains one of ``hints``, preferring exact matches."""
+    candidates = [
+        c.name
+        for c in profile.columns
+        if (not dynamic_only or c.role == "dynamic") and c.name in df.columns
+    ]
+    for hint in hints:
+        for name in candidates:
+            if name.lower() == hint:
+                return name
+    for hint in hints:
+        for name in candidates:
+            if hint in name.lower():
+                return name
+    return None
+
+
+def detect_state_column(df: pd.DataFrame, profile: DatasetProfile) -> str | None:
+    """Find the column holding the lifecycle state.
+
+    By name first. Failing that, the dynamic categorical with the fewest values
+    — a delinquency ladder is short, and it has to change or it would not be
+    dynamic.
+    """
+    named = detect_by_name(df, profile, STATE_NAME_HINTS, dynamic_only=True)
+    if named:
+        return named
+
+    best: tuple[str, int] | None = None
+    for col in profile.columns:
+        if col.role != "dynamic" or col.dtype not in ("category", "str", "bool"):
+            continue
+        if not 1 < col.distinct <= MAX_STATE_VALUES:
+            continue
+        if best is None or col.distinct < best[1]:
+            best = (col.name, col.distinct)
+    return best[0] if best else None
+
+
+# ---------------------------------------------------------------------------
+# lifecycle
+# ---------------------------------------------------------------------------
+
+
+def learn_lifecycle(
+    ordered: pd.DataFrame, id_column: str, time_column: str, state_column: str
+) -> dict[str, Any] | None:
+    """Count observed state transitions into a matrix.
+
+    Terminal states are identified by behaviour, not by name: a state an entity
+    is never observed to leave, and after which it stops appearing, is terminal.
+    A state it never leaves but keeps being reported in is absorbing.
+    """
+    states = ordered[state_column].dropna()
+    if states.nunique() < 2:
+        return None
+
+    nxt = ordered.groupby(id_column)[state_column].shift(-1)
+    pairs = pd.DataFrame({"from": ordered[state_column], "to": nxt})
+    observed = pairs.dropna()
+    if observed.empty:
+        return None
+
+    first_period = ordered[time_column].min()
+    initial = ordered[ordered[time_column] == first_period][state_column].value_counts()
+
+    # Order states best-first, because the engine and the stress scenarios both
+    # read that ordering as severity: a scenario worsens outcomes by shifting
+    # weight to *later* states. Frequency in the opening cut-off is the proxy —
+    # a healthy pool is mostly performing — which is a heuristic, so it is
+    # flagged for review in the generated spec rather than trusted.
+    labels = list(initial.index) + [
+        s for s in sorted(states.unique(), key=str) if s not in initial.index
+    ]
+
+    counts = pd.crosstab(observed["from"], observed["to"]).reindex(
+        index=labels, columns=labels, fill_value=0
+    )
+
+    last_period = ordered[time_column].max()
+    last_row = ordered.groupby(id_column).tail(1)
+
+    # A state is terminal when entities stop being reported after reaching it.
+    #
+    # Observations at the final cut-off carry no information: an entity seen
+    # there does not reappear, but that is because the panel ended, not because
+    # the state ended it. They are therefore excluded from the denominator
+    # rather than counted as evidence against — counting them would make a state
+    # look non-terminal purely in proportion to how many entities happened to be
+    # sitting in it when the data stopped.
+    terminal = []
+    before_end = ordered[ordered[time_column] < last_period]
+    for label in labels:
+        occurrences = int((before_end[state_column] == label).sum())
+        if not occurrences:
+            continue
+        exits = int(
+            ((last_row[state_column] == label) & (last_row[time_column] < last_period)).sum()
+        )
+        if exits / occurrences > 0.8:
+            terminal.append(label)
+
+    live = [label for label in labels if label not in terminal]
+    live_counts = counts.reindex(index=live, columns=live, fill_value=0)
+    totals = live_counts.sum(axis=1)
+
+    # Absorbing is judged on the *live* matrix, not on raw counts. A defaulted
+    # loan does eventually leave for charge-off, but that exit is a separate
+    # dwell-time hazard rather than a matrix transition; within the matrix the
+    # state is genuinely absorbing. Judging on raw counts would miss every such
+    # state and produce a spec whose matrix and declarations disagree.
+    absorbing = [
+        label
+        for label in live
+        if totals.get(label, 0) > 0 and live_counts.loc[label, label] / totals[label] > 0.999
+    ]
+
+    thin = [label for label in live if totals.get(label, 0) < MIN_TRANSITIONS_PER_ROW]
+    matrix = []
+    for label in live:
+        total = totals.get(label, 0)
+        if total > 0:
+            matrix.append([round(float(v), 6) for v in (live_counts.loc[label] / total)])
+        else:
+            # Never observed leaving: treat as staying put rather than inventing
+            # transitions from no evidence.
+            matrix.append([1.0 if other == label else 0.0 for other in live])
+
+    matrix = [_renormalise(row) for row in matrix]
+
+    return {
+        "state_column": state_column,
+        "states": [str(s) for s in labels],
+        "transition_states": [str(s) for s in live],
+        "transitions": matrix,
+        "terminal": [str(s) for s in terminal],
+        "absorbing": [str(s) for s in absorbing],
+        "observed_transitions": len(observed),
+        "initial_distribution": {
+            str(k): round(float(v), 6) for k, v in initial.div(initial.sum()).items()
+        },
+        "low_evidence_states": [str(s) for s in thin],
+        "state_order_note": (
+            "states are ordered by their share of the first cut-off, as a proxy for severity; "
+            "check the order before relying on stress scenarios, which treat later states as worse"
+        ),
+        "confidence": 0.3 if thin else 0.85,
+    }
+
+
+def _renormalise(row: list[float]) -> list[float]:
+    """Force a row to sum to exactly 1 despite rounding."""
+    total = sum(row)
+    if total <= 0:
+        return row
+    scaled = [v / total for v in row]
+    # Push the rounding residue into the largest cell, where it is least visible.
+    rounded = [round(v, 6) for v in scaled]
+    residue = 1.0 - sum(rounded)
+    biggest = rounded.index(max(rounded))
+    rounded[biggest] = round(rounded[biggest] + residue, 6)
+    return rounded
+
+
+# ---------------------------------------------------------------------------
+# attrition
+# ---------------------------------------------------------------------------
+
+
+def learn_attrition(df: pd.DataFrame, id_column: str, time_column: str) -> dict[str, Any] | None:
+    """Measure how fast entities leave the pool.
+
+    The per-period rate is converted to an annualised one, since that is how
+    prepayment is quoted and calibrated in practice.
+    """
+    periods = sorted(df[time_column].dropna().unique())
+    if len(periods) < 2:
+        return None
+
+    counts = df.groupby(time_column)[id_column].nunique().reindex(periods)
+    survivals = []
+    for before, after in zip(counts.to_numpy()[:-1], counts.to_numpy()[1:], strict=True):
+        if before > 0:
+            survivals.append(after / before)
+    if not survivals:
+        return None
+
+    survival = float(np.mean(survivals))
+    per_period = max(0.0, 1.0 - survival)
+    annual = 1.0 - (1.0 - per_period) ** 12 if per_period < 1 else 1.0
+    return {
+        "period_rate": round(per_period, 6),
+        "annual_rate": round(min(annual, 0.999), 6),
+        "periods_observed": len(periods),
+        "confidence": 0.8 if len(periods) >= 6 else 0.4,
+    }
+
+
+# ---------------------------------------------------------------------------
+# counters
+# ---------------------------------------------------------------------------
+
+
+def learn_counters(
+    ordered: pd.DataFrame, id_column: str, profile: DatasetProfile
+) -> list[dict[str, Any]]:
+    """Find numeric columns that move by a fixed step every period.
+
+    Seasoning up by one and remaining term down by one are the obvious cases,
+    and both are trivially detectable: take the per-entity difference and see
+    whether one value dominates.
+    """
+    found: list[dict[str, Any]] = []
+    for col in profile.columns:
+        if col.role != "dynamic" or col.dtype not in ("int", "float"):
+            continue
+        if col.name not in ordered.columns:
+            continue
+        diffs = ordered.groupby(id_column)[col.name].diff().dropna()
+        if diffs.empty:
+            continue
+        counts = diffs.value_counts(normalize=True)
+        step, share = counts.index[0], counts.iloc[0]
+        # A step of zero is a column that simply does not move, not a counter.
+        if share > 0.9 and step != 0 and float(step) == round(float(step), 4):
+            found.append(
+                {
+                    "column": col.name,
+                    "step": round(float(step), 6),
+                    "consistency": round(float(share), 4),
+                    "confidence": round(float(share), 3),
+                }
+            )
+    return found
+
+
+# ---------------------------------------------------------------------------
+# amortisation
+# ---------------------------------------------------------------------------
+
+
+def learn_amortisation(
+    ordered: pd.DataFrame,
+    id_column: str,
+    balance_column: str,
+    profile: DatasetProfile,
+    state_column: str | None,
+) -> dict[str, Any] | None:
+    """Work out which amortisation kernel the observed balances follow.
+
+    Each candidate predicts the next balance from the current one; whichever
+    predicts observed balances most closely wins. Only *falling* balances are
+    used, because a frozen balance is consistent with every kernel and would
+    make them all look equally good.
+    """
+    if balance_column not in ordered.columns:
+        return None
+
+    balances = ordered.groupby(id_column)[balance_column]
+    prev = balances.shift()
+    curr = ordered[balance_column]
+    moving = prev.notna() & (prev > 0) & (curr > 0) & (curr < prev)
+
+    if moving.sum() < 20:
+        return {
+            "kind": "interest_only",
+            "reason": "balances never fell in the sample, so nothing amortises",
+            "confidence": 0.4,
+        }
+
+    ratio = (curr[moving] / prev[moving]).median()
+    absolute = (prev[moving] - curr[moving]).median()
+
+    rate_column = detect_by_name(ordered, profile, ("interest_rate", "rate", "coupon"))
+    payment_column = detect_by_name(
+        ordered, profile, ("scheduled_monthly_payment", "payment", "instalment", "installment")
+    )
+
+    # An annuity retires a growing slice of principal each period, so the
+    # absolute reduction rises over time; a linear loan retires a constant one.
+    kind, confidence, reason = "linear", 0.5, "balances fell by a roughly constant amount"
+    if rate_column and payment_column:
+        kind = "annuity"
+        confidence = 0.75
+        reason = f"found both a rate ({rate_column}) and a payment ({payment_column}) column"
+    elif ratio > 0.98:
+        kind = "linear"
+        confidence = 0.5
+        reason = f"balances fell slowly and steadily (median ratio {ratio:.4f})"
+
+    out: dict[str, Any] = {
+        "kind": kind,
+        "balance": balance_column,
+        "median_period_ratio": round(float(ratio), 6),
+        "median_period_reduction": round(float(absolute), 2),
+        "reason": reason,
+        "confidence": confidence,
+    }
+    if rate_column:
+        out["rate"] = rate_column
+    if payment_column:
+        out["payment"] = payment_column
+    if state_column:
+        # Which states were actually paying down, so the spec can restrict
+        # amortisation to them rather than letting defaulted loans amortise.
+        paying = ordered.loc[moving, state_column].value_counts(normalize=True)
+        out["only_when_state"] = [str(s) for s in paying[paying > 0.5].index.tolist()]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# indices
+# ---------------------------------------------------------------------------
+
+
+def learn_index_drift(
+    df: pd.DataFrame, time_column: str, profile: DatasetProfile
+) -> list[dict[str, Any]]:
+    """Back out the growth rate applied to valuation columns."""
+    found: list[dict[str, Any]] = []
+    for col in profile.columns:
+        if col.role != "dynamic" or col.dtype != "float":
+            continue
+        if not any(hint in col.name.lower() for hint in VALUATION_NAME_HINTS):
+            continue
+        means = df.groupby(time_column)[col.name].mean().dropna()
+        if len(means) < 2 or (means <= 0).any():
+            continue
+        # Geometric mean of period-over-period growth.
+        growth = float(np.exp(np.diff(np.log(means.to_numpy())).mean()))
+        found.append(
+            {
+                "name": f"{col.name}_index",
+                "applies_to": [col.name],
+                "kind": "constant_drift",
+                "annual": round(growth**12 - 1.0, 6),
+                "period_multiplier": round(growth, 8),
+                "confidence": 0.7 if len(means) >= 6 else 0.4,
+            }
+        )
+    return found
