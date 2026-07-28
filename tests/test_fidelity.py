@@ -176,13 +176,36 @@ def test_transition_delta_catches_different_dynamics():
     """Two panels can share a state mix and behave completely differently."""
     sticky = _panel(["A", "A", "A", "A", "B", "B", "B", "B"])
     flappy = _panel(["A", "B", "A", "B", "A", "B", "A", "B"])
-    delta = transition_delta(sticky, flappy, "id", "t", "state")
+    delta, _floor = transition_delta(sticky, flappy, "id", "t", "state")
     assert delta is not None and delta > 0.5
 
 
 def test_transition_delta_is_none_without_the_needed_columns():
     df = pd.DataFrame({"a": [1, 2]})
-    assert transition_delta(df, df, "id", "t", "state") is None
+    delta, _floor = transition_delta(df, df, "id", "t", "state")
+    assert delta is None
+
+
+def test_the_transition_floor_shrinks_as_evidence_grows(rng):
+    """A matrix row resting on 40 observations cannot be judged as tightly as
+    one resting on 40,000 — which is why a flat threshold reports on how rare a
+    state is rather than on whether the dynamics match."""
+
+    def panel(n_entities: int) -> pd.DataFrame:
+        rows = []
+        for i in range(n_entities):
+            state = "A"
+            for period in range(6):
+                rows.append({"id": f"L{i}", "t": f"2024-{period + 1:02d}-28", "state": state})
+                # A genuine 30% chance of switching, so cells sit away from 0/1
+                # where the binomial standard error would vanish.
+                if rng.random() < 0.3:
+                    state = "B" if state == "A" else "A"
+        return pd.DataFrame(rows)
+
+    _delta, small = transition_delta(panel(20), panel(20), "id", "t", "state")
+    _delta, large = transition_delta(panel(3000), panel(3000), "id", "t", "state")
+    assert small > large
 
 
 # ---------------------------------------------------------------------------

@@ -331,24 +331,97 @@ def transition_delta(
     id_column: str,
     time_column: str,
     state_column: str,
-) -> float | None:
-    """Largest absolute difference between two empirical transition matrices."""
+) -> tuple[float | None, float]:
+    """Largest difference between two empirical transition matrices, and its floor.
+
+    Returns ``(delta, noise_floor)``.
+
+    A transition matrix is estimated far less evenly than a marginal. In a
+    healthy mortgage pool the Performing row rests on hundreds of thousands of
+    observations while the 60-89-days-late row rests on a few hundred, so its
+    cells carry roughly thirty times the standard error. Comparing every cell
+    against one flat threshold therefore reports on how rare a state is rather
+    than on whether the dynamics match: measured against upstream, the largest
+    cell difference sat at 1.2 standard errors and still breached a flat 0.02.
+
+    Each cell is a binomial proportion, so the two estimates differ with
+    standard error ``sqrt(p(1-p)(1/n_a + 1/n_b))`` where the ``n`` are the row
+    counts behind them. The floor is three of those, taken over whichever cell
+    is worst — the same tail-bound reasoning used for the other measures.
+    """
     for frame in (reference, synthetic):
         if not {id_column, time_column, state_column} <= set(frame.columns):
-            return None
+            return None, DEFAULT_TRANSITION_THRESHOLD
     a, _ = transition_matrix(reference, id_column, time_column, state_column)
     b, _ = transition_matrix(synthetic, id_column, time_column, state_column)
     if a.empty or b.empty:
-        return None
+        return None, DEFAULT_TRANSITION_THRESHOLD
+
     states = sorted(set(a.index) | set(b.index))
     a = a.reindex(index=states, columns=states, fill_value=0.0)
     b = b.reindex(index=states, columns=states, fill_value=0.0)
-    return float(np.nanmax((a - b).abs().to_numpy()))
+    delta = float(np.nanmax((a - b).abs().to_numpy()))
+
+    counts_a = _transition_row_counts(reference, id_column, time_column, state_column, states)
+    counts_b = _transition_row_counts(synthetic, id_column, time_column, state_column, states)
+
+    floor = 0.0
+    for i, state in enumerate(states):
+        n_a, n_b = counts_a.get(state, 0), counts_b.get(state, 0)
+        if n_a < 2 or n_b < 2:
+            # A terminal state has no outgoing transitions by construction, so
+            # there is nothing to judge and nothing to widen the floor for.
+            # Treating it as unjudgeable would push the limit to 1.0 and make
+            # the whole check vacuous.
+            continue
+        for j in range(len(states)):
+            p = (a.iloc[i, j] + b.iloc[i, j]) / 2.0
+            se = float(np.sqrt(max(p * (1.0 - p), 0.0) * (1.0 / n_a + 1.0 / n_b)))
+            floor = max(floor, 3.0 * se)
+    return delta, floor
+
+
+def _transition_row_counts(
+    df: pd.DataFrame, id_column: str, time_column: str, state_column: str, states: list[str]
+) -> dict[str, int]:
+    """How many observed transitions start from each state."""
+    ordered = df[[id_column, time_column, state_column]].sort_values([id_column, time_column])
+    nxt = ordered.groupby(id_column)[state_column].shift(-1)
+    starts = ordered.loc[nxt.notna(), state_column].value_counts()
+    return {s: int(starts.get(s, 0)) for s in states}
 
 
 # ---------------------------------------------------------------------------
 # the comparison
 # ---------------------------------------------------------------------------
+
+
+def effective_sample_sizes(
+    df: pd.DataFrame, columns: list[str], id_column: str | None
+) -> dict[str, int]:
+    """How many *independent* observations each column really has.
+
+    A panel repeats every entity once per period, so a 20,000-loan panel over 24
+    cut-offs has 480,000 rows — but a loan's province is the same value 24 times
+    over. Treating those as 480,000 independent draws makes the noise floor
+    about five times too tight, and every static column is then reported as a
+    fidelity failure on what is really sampling noise.
+
+    So: a column that never varies within an entity gets the entity count; one
+    that moves gets the row count. One groupby covers every column at once,
+    which matters on a 71-column panel.
+    """
+    rows = len(df)
+    if not id_column or id_column not in df.columns:
+        return dict.fromkeys(columns, rows)
+
+    entities = int(df[id_column].nunique())
+    checkable = [c for c in columns if c in df.columns and c != id_column]
+    if not checkable or entities == rows:
+        return dict.fromkeys(columns, rows)
+
+    varies = df.groupby(id_column)[checkable].nunique().max()
+    return {c: (rows if varies.get(c, 2) > 1 else entities) for c in columns}
 
 
 def compare(
@@ -379,6 +452,10 @@ def compare(
     shared = [c for c in reference.columns if c in synthetic.columns and c not in skip]
     missing = [c for c in reference.columns if c not in synthetic.columns]
 
+    # Panel rows are not independent; see `effective_sample_sizes`.
+    n_ref_by_column = effective_sample_sizes(reference, shared, id_column)
+    n_syn_by_column = effective_sample_sizes(synthetic, shared, id_column)
+
     results: list[ColumnFidelity] = []
     skipped: list[str] = list(missing)
 
@@ -386,7 +463,8 @@ def compare(
         ref, syn = reference[col], synthetic[col]
         numeric = pd.api.types.is_numeric_dtype(ref) and pd.api.types.is_numeric_dtype(syn)
 
-        n_ref, n_syn = len(ref.dropna()), len(syn.dropna())
+        n_ref = min(n_ref_by_column.get(col, len(ref)), len(ref.dropna()))
+        n_syn = min(n_syn_by_column.get(col, len(syn)), len(syn.dropna()))
 
         if numeric:
             distance = ks_distance(ref, syn)
@@ -405,6 +483,7 @@ def compare(
                     passed=distance <= effective,
                     detail={
                         "noise_floor": round(floor, 6),
+                        "effective_n": n_ref,
                         "reference_mean": _safe(ref.mean()),
                         "synthetic_mean": _safe(syn.mean()),
                         "reference_std": _safe(ref.std()),
@@ -426,6 +505,7 @@ def compare(
                     passed=distance <= effective,
                     detail={
                         "noise_floor": round(floor, 6),
+                        "effective_n": n_ref,
                         "reference_categories": int(ref.nunique()),
                         "synthetic_categories": int(syn.nunique()),
                     },
@@ -433,13 +513,15 @@ def compare(
             )
 
     corr, corr_excluded, n_corr = correlation_delta(reference, synthetic, shared)
-    effective_corr = max(
-        corr_threshold, correlation_noise_floor(min(len(reference), len(synthetic)), n_corr)
+    effective_rows = min(
+        min(n_ref_by_column.values(), default=len(reference)),
+        min(n_syn_by_column.values(), default=len(synthetic)),
     )
-    trans = (
+    effective_corr = max(corr_threshold, correlation_noise_floor(effective_rows, n_corr))
+    trans, trans_floor = (
         transition_delta(reference, synthetic, id_column, time_column, state_column)
         if id_column and time_column and state_column
-        else None
+        else (None, transition_threshold)
     )
 
     return FidelityReport(
@@ -448,7 +530,7 @@ def compare(
         correlation_threshold=round(effective_corr, 6),
         correlation_excluded=corr_excluded,
         transition_delta=trans,
-        transition_threshold=transition_threshold,
+        transition_threshold=round(max(transition_threshold, trans_floor), 6),
         skipped=skipped,
     )
 

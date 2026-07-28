@@ -48,7 +48,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def auto_lease_spec() -> dict:
     return {
         "spec_version": 1,
-        "meta": {"name": "auto_lease", "asset_class": "auto", "regulatory_template": "ESMA Annex 5"},
+        "meta": {
+            "name": "auto_lease",
+            "asset_class": "auto",
+            "regulatory_template": "ESMA Annex 5",
+        },
         "entity": {
             "id_column": "contract_id",
             "id_format": "AUT{deal_year}-{seq:05d}",
@@ -175,9 +179,18 @@ def auto_lease_spec() -> dict:
         "emit": {
             "filename": "auto_lease_{yyyy}Q{period}.csv",
             "column_order": [
-                "contract_id", "cut_off_date", "currency", "country", "originator",
-                "vehicle_type", "fuel", "original_value", "residual_value",
-                "residual_pct", "quarters_remaining", "status",
+                "contract_id",
+                "cut_off_date",
+                "currency",
+                "country",
+                "originator",
+                "vehicle_type",
+                "fuel",
+                "original_value",
+                "residual_value",
+                "residual_pct",
+                "quarters_remaining",
+                "status",
             ],
         },
         "validation": {"non_negative_columns": ["residual_value", "original_value"]},
