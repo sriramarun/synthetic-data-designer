@@ -41,8 +41,25 @@ that spec for you by reading your data.
 ## Try it
 
 ```bash
-pip install -e '.[dev]'
+pip install -e '.[dev,web]'
 ```
+
+```bash
+sdd ui
+```
+
+A local page at `http://127.0.0.1:8000` walks the whole flow — drop in a tape, read
+what the analysis found, adjust the knobs, generate, inspect. Nothing leaves the
+machine. Screens: **Source** (upload or pick a pack) → **Analysis** (what was
+inferred, and how confident) → **Configure** (scale, periods, scenario,
+amortisation, the transition matrix as an editable grid with live row sums, and
+per-column distribution parameters, plus raw YAML as an escape hatch) →
+**Results** (invariant report, pool-over-time chart, downloads).
+
+Every edit is validated by the same loader the CLI uses, so the UI cannot accept a
+spec the engine would reject.
+
+Or drive it from the command line:
 
 ```bash
 sdd packs
@@ -235,6 +252,7 @@ pip install -e '.[deep]'   # CTGAN/TVAE polish on top of the rule-based sample
 ## Commands
 
 ```
+sdd ui                                open the local web UI
 sdd packs                             list the bundled asset-class packs
 sdd profile SAMPLE                    analyse a tape, print what it found
 sdd design SAMPLE -o spec.yaml        analyse it and write a runnable spec
@@ -260,9 +278,9 @@ That is the seam a web UI plugs into — the CLI is simply its first consumer.
 | **M4** profiler: sample data → spec | done |
 | **M5** optional NeMo and CTGAN backends | done |
 | **M6** JSON API façade + CLI | done |
-| **UI** | not started — deliberately a later phase |
+| **UI** local web app (upload, edit, run, inspect) | done |
 
-246 tests. `pytest` green and `ruff` clean on every commit.
+284 tests. `pytest` green and `ruff` clean on every commit.
 
 Honest scope notes:
 

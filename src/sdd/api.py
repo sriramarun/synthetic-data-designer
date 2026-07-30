@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -93,6 +94,57 @@ def spec_hash(spec: Any) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+# Everything from `[type=` onward is pydantic's machine detail, and it embeds
+# the whole rejected value — which itself contains brackets, so this cannot stop
+# at the first closing one.
+_PYDANTIC_TAIL = re.compile(r"\s*\[type=.*$")
+_NOISE = re.compile(
+    r"^(?:invalid design spec:|.* is not a valid design spec:|"
+    r"\d+ validation error.*|spec '.*' has \d+ problem\(s\):)$"
+)
+
+
+def explain_problems(error: Exception) -> list[str]:
+    """Turn a validation failure into lines a person can act on.
+
+    The messages written into :mod:`sdd.spec.schema` are deliberately specific —
+    *"transition matrix row 0 ('Performing') sums to 0.857500, expected 1.0"*.
+    Pydantic then wraps each one in a header, a field path, a ``[type=…]`` tail
+    carrying the entire rejected input, and a docs link. Handed to a UI verbatim
+    the useful sentence ends up as the fourth of five lines, behind
+    *"invalid design spec:"*, so the interface shows the user nothing.
+
+    This keeps the sentence and the field it belongs to, and drops the rest.
+    """
+    problems: list[str] = []
+    field: str | None = None
+
+    for raw in str(error).splitlines():
+        line = raw.rstrip()
+        if not line.strip() or _NOISE.match(line.strip()):
+            continue
+        if line.strip().startswith("For further information visit"):
+            continue
+
+        stripped = line.strip()
+        # Our own check_spec bullets are already clean.
+        if stripped.startswith("- "):
+            problems.append(stripped[2:])
+            continue
+        # An unindented line with no message is pydantic naming the field.
+        if not line.startswith(" ") and "error," not in stripped:
+            field = stripped
+            continue
+
+        message = _PYDANTIC_TAIL.sub("", stripped)
+        for prefix in ("Value error, ", "Assertion failed, "):
+            if message.startswith(prefix):
+                message = message[len(prefix) :]
+        problems.append(f"{field}: {message}" if field else message)
+
+    return problems or [str(error).strip() or "the spec could not be validated"]
+
+
 def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
     """Validate a spec and report problems as data rather than an exception."""
     from sdd.spec import SpecError
@@ -100,7 +152,7 @@ def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
     try:
         loaded = load(spec)
     except (SpecError, SddError) as exc:
-        return {"valid": False, "problems": str(exc).splitlines(), "spec": None}
+        return {"valid": False, "problems": explain_problems(exc), "spec": None}
     return {
         "valid": True,
         "problems": [],

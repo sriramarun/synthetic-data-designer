@@ -4,6 +4,7 @@ Deliberately thin. Everything the CLI can do, the API can do, which is what
 keeps the eventual web layer honest: if a command needs logic that is not in
 ``api``, the logic is in the wrong place.
 
+    sdd ui                                open the local web UI
     sdd packs                             list the bundled asset-class packs
     sdd profile SAMPLE                    analyse a tape, print what it found
     sdd design SAMPLE -o spec.yaml        analyse it and write a runnable spec
@@ -44,6 +45,26 @@ def _bar(stage: str, fraction: float) -> None:
     sys.stderr.flush()
     if fraction >= 1.0:
         sys.stderr.write("\n")
+
+
+@app.command()
+def ui(
+    host: Annotated[str, typer.Option(help="Bind address. Localhost by default.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to serve on.")] = 8000,
+    reload: Annotated[bool, typer.Option("--reload", help="Auto-reload on code changes.")] = False,
+) -> None:
+    """Open the local web UI: upload a tape, edit the spec, run it, inspect the result."""
+    try:
+        from sdd.web.app import serve
+    except ImportError as exc:
+        typer.secho(
+            "the web UI needs a couple of extra packages:\n  pip install 'sdd[web]'",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1) from exc
+
+    typer.secho(f"\n  Synthetic Data Designer  ->  http://{host}:{port}\n", fg=typer.colors.GREEN)
+    serve(host=host, port=port, reload=reload)
 
 
 @app.command()

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Synthetic Data Designer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header>
+  <h1>Synthetic Data Designer</h1>
+  <span class="tag" id="version"></span>
+  <span class="spacer"></span>
+  <span class="tag" id="spec-name"></span>
+</header>
+
+<nav class="steps" id="steps">
+  <button class="step" data-view="source"    aria-current="true"><span class="n">1</span>Source</button>
+  <button class="step" data-view="profile"   disabled><span class="n">2</span>Analysis</button>
+  <button class="step" data-view="configure" disabled><span class="n">3</span>Configure</button>
+  <button class="step" data-view="results"   disabled><span class="n">4</span>Results</button>
+</nav>
+
+<main>
+
+  <!-- ---------------------------------------------------------- 1. source -->
+  <section class="view" id="view-source">
+    <div class="card">
+      <h2>Start from your own data</h2>
+      <p class="hint">
+        Upload a loan tape as CSV or Parquet. It gets analysed — column types, which
+        fields stay fixed per loan and which move, the distributions, and if the file
+        holds more than one cut-off, the lifecycle and dynamics too. Nothing leaves
+        this machine.
+      </p>
+      <div class="drop" id="drop">
+        <strong>Drop a file here, or click to choose</strong>
+        <span>.csv or .parquet &middot; one row per loan per cut-off</span>
+        <input type="file" id="file" accept=".csv,.parquet,.pq" hidden />
+      </div>
+      <div id="upload-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Or start from a calibrated pack</h2>
+      <p class="hint">
+        A pack is a spec that has already been calibrated against a real asset class.
+        Load one, adjust the knobs, and run.
+      </p>
+      <div class="pack-list" id="packs"></div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- 2. profile -->
+  <section class="view" id="view-profile" hidden>
+    <div class="card">
+      <h2>What the analysis found</h2>
+      <p class="hint" id="profile-hint"></p>
+      <div class="stats" id="profile-stats"></div>
+      <div id="profile-detection"></div>
+    </div>
+
+    <div class="card" id="profile-dynamics-card" hidden>
+      <h2>Behaviour recovered from the panel</h2>
+      <p class="hint">
+        These were measured from the data, not assumed — counted transitions, observed
+        attrition, and balance paths tested against each amortisation formula.
+      </p>
+      <div id="profile-dynamics"></div>
+    </div>
+
+    <div class="card">
+      <h2>Columns</h2>
+      <div class="col-filter">
+        <input type="text" id="profile-filter" placeholder="Filter columns&hellip;" />
+        <label class="field" style="flex-direction:row;align-items:center;gap:6px">
+          <input type="checkbox" id="profile-review-only" style="width:auto" />
+          <span>Needs review only</span>
+        </label>
+      </div>
+      <div class="scroll"><table id="profile-columns"></table></div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------- 3. configure -->
+  <section class="view" id="view-configure" hidden>
+    <div class="card">
+      <h2>Run</h2>
+      <p class="hint">How much data, over how long, and with which stress overlay.</p>
+      <div class="grid three">
+        <label class="field">
+          <span class="lbl">Entities</span>
+          <input type="number" id="cfg-records" min="1" step="1000" value="10000" />
+          <span class="sub">Loans, leases or facilities in the pool.</span>
+        </label>
+        <label class="field">
+          <span class="lbl">Periods</span>
+          <input type="number" id="cfg-periods" min="1" step="1" />
+          <span class="sub" id="cfg-periods-sub"></span>
+        </label>
+        <label class="field">
+          <span class="lbl">Seed</span>
+          <input type="number" id="cfg-seed" step="1" value="42" />
+          <span class="sub">Same seed, same data.</span>
+        </label>
+      </div>
+      <div class="grid two" style="margin-top:14px">
+        <label class="field">
+          <span class="lbl">Scenario</span>
+          <select id="cfg-scenario"></select>
+          <span class="sub" id="cfg-scenario-sub">A stress overlay that shifts defaults, prepayment and collateral together.</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card" id="card-dynamics">
+      <h2>Dynamics</h2>
+      <p class="hint">How balances move, and what happens to collateral each period.</p>
+      <div id="cfg-dynamics"></div>
+    </div>
+
+    <div class="card" id="card-lifecycle">
+      <h2>Lifecycle</h2>
+      <p class="hint">
+        Each row is a state, each column where a loan might move next period. Rows must
+        sum to 1 — the total is shown live, and turns red if it does not.
+      </p>
+      <div class="matrix" id="cfg-matrix"></div>
+      <div id="cfg-hazards" style="margin-top:20px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Columns</h2>
+      <p class="hint">Distribution parameters per column. Edit a weight or a scale and it is validated immediately.</p>
+      <div class="col-filter">
+        <input type="text" id="cfg-filter" placeholder="Filter columns&hellip;" />
+      </div>
+      <div id="cfg-columns"></div>
+    </div>
+
+    <div class="card">
+      <details class="raw">
+        <summary>Raw spec (YAML)</summary>
+        <p class="hint">
+          Everything above edits this document. Anything the forms do not expose can be
+          changed here — paste and apply, and it is validated before it is accepted.
+        </p>
+        <textarea id="cfg-yaml" spellcheck="false"></textarea>
+        <div class="actions">
+          <button class="btn ghost" id="btn-yaml-apply">Apply YAML</button>
+          <button class="btn ghost" id="btn-yaml-revert">Revert to form state</button>
+        </div>
+        <div id="yaml-status"></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- 4. results -->
+  <section class="view" id="view-results" hidden>
+    <div class="card" id="run-progress-card" hidden>
+      <h2>Running</h2>
+      <div class="progress-line">
+        <span id="run-stage">starting&hellip;</span>
+        <span class="pct" id="run-pct">0%</span>
+      </div>
+      <div class="bar"><i id="run-bar" style="width:0%"></i></div>
+    </div>
+
+    <div id="run-error"></div>
+
+    <div id="results-body" hidden>
+      <div class="card">
+        <h2>Summary</h2>
+        <div class="stats" id="run-stats"></div>
+        <div id="run-validation" style="margin-top:16px"></div>
+      </div>
+
+      <div class="card">
+        <h2>Pool over time</h2>
+        <p class="hint">Every loan in every period, coloured by state. Attrition is loans leaving the pool as they redeem or write off.</p>
+        <div id="mix-chart"></div>
+      </div>
+
+      <div class="card">
+        <h2>Output</h2>
+        <div class="scroll"><table id="run-files"></table></div>
+      </div>
+
+      <div class="card">
+        <h2>First rows</h2>
+        <p class="hint" id="preview-hint"></p>
+        <div class="scroll"><table id="run-preview"></table></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="footer-bar">
+  <div class="footer-inner">
+    <span class="status" id="footer-status">Choose a source to begin.</span>
+    <span class="spacer"></span>
+    <button class="btn ghost" id="btn-back" hidden>Back</button>
+    <button class="btn" id="btn-next" disabled>Next</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
