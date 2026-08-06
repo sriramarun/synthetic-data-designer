@@ -190,7 +190,9 @@ def add_outliers(
 
     touched = 0
     for name in targets:
-        values = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float)
+        # Copied, because the rows are written in place below and pandas hands
+        # out a read-only array under copy-on-write.
+        values = pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float, copy=True)
         spread = float(np.nanstd(values))
         if not np.isfinite(spread) or spread <= 0:
             continue

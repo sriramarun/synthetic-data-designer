@@ -476,11 +476,16 @@ def measure_correlation(df: pd.DataFrame, columns: list[str]) -> dict[str, Any] 
         return None
 
     frame = df[usable].apply(pd.to_numeric, errors="coerce")
-    matrix = frame.corr(method="spearman", min_periods=20)
-    if matrix.isna().all().all():
+    correlations = frame.corr(method="spearman", min_periods=20)
+    if correlations.isna().all().all():
         return None
-    matrix = matrix.fillna(0.0)
-    np.fill_diagonal(matrix.values, 1.0)
+
+    # Taken into numpy with an explicit copy before anything is written into it.
+    # Under pandas' copy-on-write — the default from pandas 3 — the array behind
+    # a frame is handed out read-only, and `fill_diagonal` on it raises.
+    values = correlations.fillna(0.0).to_numpy(dtype=float, copy=True)
+    np.fill_diagonal(values, 1.0)
+    matrix = pd.DataFrame(values, index=correlations.index, columns=correlations.columns)
 
     # Drop columns that correlate with nothing: carrying them costs spec size and
     # buys no structure.
