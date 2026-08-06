@@ -34,10 +34,25 @@ sdd ui
 
 ## Hugging Face Spaces
 
-Yes, it works — on the **Docker** SDK. It is a FastAPI app serving a static front
-end, which is exactly what Docker Spaces are for. Gradio and Streamlit Spaces
-expect you to have written the app in those frameworks, so they are not an option
-here.
+Technically yes, on the **Docker** SDK — it is a FastAPI app serving a static
+front end, which is what Docker Spaces are for. Gradio and Streamlit Spaces
+expect the app to be written in those frameworks, so they are not an option.
+
+**It is not free.** As of this writing, a Docker Space on `cpu-basic` requires:
+
+| Namespace | Requires |
+|---|---|
+| A personal account | a **PRO** subscription — <https://huggingface.co/pro> |
+| An organisation | a **Team or Enterprise** plan — <https://huggingface.co/enterprise> |
+
+The free tier hosts **Static** Spaces only: HTML and JavaScript, no server
+process. That rules this out entirely — profiling, generating and ageing all
+need Python running, and there is no version of that which is static.
+
+Attempting it without a plan fails at creation with a `402 Payment Required` and
+a message naming which plan is needed, so you will not get a half-deployed
+Space. If you are not paying Hugging Face, skip to
+[any other host](#any-other-host) — the same Dockerfile runs anywhere.
 
 Everything needed is in `deploy/huggingface/`:
 
@@ -68,14 +83,14 @@ why, so nothing looks broken.
 Everything else is there: all four schema-only generation methods, the full
 ageing engine, both calibrated packs, the charts, and all five download formats.
 
-### The free tier, honestly
+### What `cpu-basic` gives you
 
 | | |
 |---|---|
 | CPU | 2 vCPU, 16 GB — fine for the default 10,000 rows × 24 periods |
-| Storage | **Ephemeral.** Wiped on every restart, and free Spaces sleep after inactivity |
+| Storage | **Ephemeral.** Wiped on every restart, and Spaces sleep after inactivity |
 | Sleep | A sleeping Space cold-starts on the next visit, which takes a moment |
-| Persistence | A paid add-on. Without it, tell people to download before they leave |
+| Persistence | A further paid add-on |
 
 Because storage is ephemeral, a generated panel is gone when the Space restarts.
 That is acceptable for a demo — the Download step is one click from Results — and

@@ -35,7 +35,19 @@ hf auth whoami >/dev/null || {
 }
 
 echo "==> Creating the Space if it does not exist"
-hf repo create "$SPACE" --repo-type space --space_sdk docker --exist-ok
+if ! hf repo create "$SPACE" --repo-type space --space-sdk docker --exist-ok; then
+    cat >&2 <<'NOTE'
+
+A Docker Space is not on the free tier. Personal accounts need PRO
+(https://huggingface.co/pro); organisations need Team or Enterprise
+(https://huggingface.co/enterprise). Free covers Static Spaces only, which
+cannot run a Python server.
+
+The Dockerfile beside this script is a plain one and runs anywhere — see
+docs/DEPLOYMENT.md for hosts that do have a free tier.
+NOTE
+    exit 1
+fi
 
 echo "==> Cloning https://huggingface.co/spaces/$SPACE"
 git clone "https://huggingface.co/spaces/$SPACE" "$STAGING/space"
@@ -44,9 +56,9 @@ cd "$STAGING/space"
 echo "==> Assembling"
 # Only what the image builds from. No tests, no docs, no generated data, and no
 # .git — the Space has its own history.
-rm -rf src packs pyproject.toml Dockerfile README.md
+rm -rf src packs pyproject.toml LICENSE Dockerfile README.md
 cp -R "$ROOT/src" "$ROOT/packs" .
-cp "$ROOT/pyproject.toml" .
+cp "$ROOT/pyproject.toml" "$ROOT/LICENSE" .
 cp "$HERE/Dockerfile" .
 cp "$HERE/README.md" .
 find . -path ./.git -prune -o -name '__pycache__' -type d -print0 | xargs -0 rm -rf

@@ -13,6 +13,23 @@ It serves on <http://127.0.0.1:8000>, binds to localhost only, and writes
 everything it produces to a `.sdd-workspace` folder in the directory you launched
 it from. Nothing is uploaded anywhere.
 
+Every screen below is captured in [`screenshots/`](screenshots), taken from a
+real run of the Dutch mortgage pack:
+
+| | |
+|---|---|
+| [Step 1 — Upload](screenshots/01-upload.png) | schema and sample, plus the calibrated packs |
+| [Step 2 — Review](screenshots/02-review.png) | detected columns, types, key, nullability, confidence |
+| [Step 3 — Scale](screenshots/03-configure-scale.png) | rows, seed, scenario |
+| [Step 3 — Generation method](screenshots/04-configure-method.png) | the six methods, with unavailable ones explained |
+| [Step 3 — Randomness](screenshots/05-configure-randomness.png) | noise, correlation, outliers, missing values |
+| [Step 3 — Data aging](screenshots/06-configure-aging.png) | periods, rates, new loans, the transition matrix |
+| [Step 3 — Schema](screenshots/07-configure-schema.png) | per-column distribution parameters |
+| [Step 3 — Advanced](screenshots/08-configure-advanced.png) | the YAML that actually runs |
+| [Step 4 — Generate](screenshots/09-generate.png) | the seven stages, mid-run |
+| [Step 5 — Results](screenshots/10-results.png) | summary, validation, four charts, the data table |
+| [Step 6 — Download](screenshots/11-download.png) | five formats and the per-period files |
+
 **Contents**
 
 - [How the whole thing fits together](#how-the-whole-thing-fits-together)
