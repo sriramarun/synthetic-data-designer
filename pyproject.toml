@@ -29,6 +29,9 @@ dependencies = [
     "pyyaml>=6.0",
     "duckdb>=0.10",
     "typer>=0.12",
+    # Excel in and out: schemas and samples arrive as workbooks, and a workbook
+    # is one of the five things a run can be downloaded as.
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

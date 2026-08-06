@@ -132,8 +132,13 @@ def sample_empirical(gen: EmpiricalGen, n: int, rng: np.random.Generator) -> np.
     return _finish(values, gen.decimals, None, None)
 
 
-def sample_sequence(gen: SequenceGen, n: int) -> np.ndarray:
-    numbers = np.arange(gen.start, gen.start + n)
+def sample_sequence(gen: SequenceGen, n: int, offset: int = 0) -> np.ndarray:
+    """``offset`` continues the sequence past entities that already exist.
+
+    An open pool builds several books over one run, and a second book starting
+    again at 1 would hand new entities the identifiers of existing ones.
+    """
+    numbers = np.arange(gen.start + offset, gen.start + offset + n)
     return np.array([f"{gen.prefix}{i:0{gen.width}d}" for i in numbers], dtype=object)
 
 
@@ -157,8 +162,14 @@ def sample_constant(gen: ConstantGen, n: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def sample(gen: Any, n: int, rng: np.random.Generator, ctx: pd.DataFrame) -> np.ndarray:
-    """Draw ``n`` values from any generator."""
+def sample(
+    gen: Any, n: int, rng: np.random.Generator, ctx: pd.DataFrame, offset: int = 0
+) -> np.ndarray:
+    """Draw ``n`` values from any generator.
+
+    ``offset`` only reaches the sequence generator, which is the one kind whose
+    output depends on how many entities came before.
+    """
     match gen:
         case CategoricalGen():
             return sample_categorical(gen, n, rng)
@@ -175,7 +186,7 @@ def sample(gen: Any, n: int, rng: np.random.Generator, ctx: pd.DataFrame) -> np.
         case EmpiricalGen():
             return sample_empirical(gen, n, rng)
         case SequenceGen():
-            return sample_sequence(gen, n)
+            return sample_sequence(gen, n, offset)
         case UUIDGen():
             return sample_uuid(gen, n, rng)
         case ConstantGen():

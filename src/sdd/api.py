@@ -158,6 +158,9 @@ def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
         "problems": [],
         "spec": {
             "name": loaded.meta.name,
+            "title": loaded.meta.title or loaded.meta.name.replace("_", " ").title(),
+            "description": loaded.meta.description,
+            "regulatory_template": loaded.meta.regulatory_template,
             "asset_class": loaded.meta.asset_class,
             "hash": spec_hash(loaded),
             "columns": len(loaded.output_columns()),
@@ -235,6 +238,437 @@ def design(
 
 
 # ---------------------------------------------------------------------------
+# schema review — step 2 of the wizard
+# ---------------------------------------------------------------------------
+
+# Name fragments that mark a column as a date even when it is stored as text.
+_DATE_HINTS = ("date", "_dt", "maturity", "origination", "cutoff", "cut_off", "as_of")
+
+
+def schema(
+    spec: str | Path | dict[str, Any], profile: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """What was detected about the schema, as an editable table.
+
+    One row per column, carrying both the decision and the evidence behind it —
+    the type, whether it is the key, whether it moves over time, how often it was
+    blank in the sample, and how confident the inference was. The UI shows this
+    before anything is generated, because a wrong key or a mistyped column is
+    cheap to fix here and expensive to find later.
+    """
+    loaded = load(spec)
+    by_name = {c["name"]: c for c in (profile or {}).get("columns", [])}
+
+    rows: list[dict[str, Any]] = []
+    for column in loaded.columns:
+        evidence = by_name.get(column.name, {})
+        rows.append(
+            {
+                "name": column.name,
+                "dtype": column.dtype or "str",
+                "role": column.role,
+                "required": column.required,
+                "null_rate": column.null_rate,
+                "primary_key": column.name == loaded.entity.id_column,
+                "date_column": column.name == loaded.entity.time_column
+                or column.dtype == "date"
+                or any(hint in column.name.lower() for hint in _DATE_HINTS),
+                "generator": column.generator.kind if column.generator else None,
+                "domain": column.domain,
+                "min": column.min,
+                "max": column.max,
+                "confidence": column.confidence,
+                "review": column.review,
+                "description": column.description,
+                # From the sample, when there was one.
+                "observed_nulls": evidence.get("nulls"),
+                "distinct": evidence.get("distinct"),
+                "examples": evidence.get("examples"),
+            }
+        )
+
+    return {
+        "columns": rows,
+        "primary_key": loaded.entity.id_column,
+        "time_column": loaded.entity.time_column,
+        "date_columns": [r["name"] for r in rows if r["date_column"]],
+        "nullable": [r["name"] for r in rows if not r["required"]],
+        "constants": sorted(loaded.constants),
+        "derived": [d.target for d in loaded.derivations],
+        "needs_review": [r["name"] for r in rows if r["review"]],
+        "counts": {
+            "columns": len(rows),
+            "static": sum(1 for r in rows if r["role"] == "static"),
+            "dynamic": sum(1 for r in rows if r["role"] == "dynamic"),
+            "derived": len(loaded.derivations),
+        },
+    }
+
+
+def edit_schema(spec: str | Path | dict[str, Any], edits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply the review table's edits — renames, retypes, required/optional.
+
+    A rename has to travel: the same name appears in the entity, the emit order,
+    the lifecycle, the dynamics and inside expressions. Renaming the column
+    definition alone would produce a spec that validates against nothing and
+    fails at generation, so every reference is rewritten with it.
+    """
+    loaded = load(spec)
+    out = loaded.model_copy(deep=True)
+    applied: list[str] = []
+
+    for edit in edits:
+        original = edit.get("original") or edit.get("name")
+        column = out.column(original)
+        if column is None:
+            continue
+
+        if "dtype" in edit and edit["dtype"] and edit["dtype"] != column.dtype:
+            column.dtype = edit["dtype"]
+            applied.append(f"{original}: type set to {edit['dtype']}")
+        if "required" in edit and bool(edit["required"]) != column.required:
+            column.required = bool(edit["required"])
+            applied.append(f"{original}: marked {'required' if column.required else 'optional'}")
+        if "null_rate" in edit:
+            column.null_rate = edit["null_rate"]
+
+        new_name = edit.get("rename") or edit.get("new_name")
+        if new_name and new_name != original:
+            _rename_column(out, original, str(new_name))
+            applied.append(f"{original} renamed to {new_name}")
+
+    if edits and (key := next((e for e in edits if e.get("primary_key")), None)):
+        name = key.get("rename") or key.get("name")
+        if name and out.column(name) is not None and name != out.entity.id_column:
+            out.entity.id_column = name
+            applied.append(f"primary key set to {name}")
+
+    payload = out.model_dump(mode="json", exclude_none=True, by_alias=True)
+    return {"spec": payload, "applied": applied, **_verdict(payload)}
+
+
+def _rename_column(spec: Any, old: str, new: str) -> None:
+    """Rewrite every reference to a column, not just its definition."""
+    import re as _re
+
+    word = _re.compile(rf"\b{_re.escape(old)}\b")
+
+    def swap(text: str | None) -> str | None:
+        return word.sub(new, text) if text else text
+
+    for column in spec.columns:
+        if column.name == old:
+            column.name = new
+        gen = column.generator
+        if getattr(gen, "kind", None) == "conditional_categorical" and gen.parent == old:
+            gen.parent = new
+
+    if spec.entity.id_column == old:
+        spec.entity.id_column = new
+    if spec.entity.time_column == old:
+        spec.entity.time_column = new
+    if spec.entity.id_format:
+        spec.entity.id_format = swap(spec.entity.id_format)
+
+    for d in spec.derivations:
+        if d.target == old:
+            d.target = new
+        if d.source == old:
+            d.source = new
+        d.expr = swap(d.expr)
+        for rule in d.rules or []:
+            rule.if_ = swap(rule.if_) or rule.if_
+        d.args = {k: swap(v) or v for k, v in d.args.items()}
+
+    lc = spec.lifecycle
+    if lc:
+        if lc.state_column == old:
+            lc.state_column = new
+        lc.state_fields = {
+            state: {(new if k == old else k): v for k, v in fields.items()}
+            for state, fields in lc.state_fields.items()
+        }
+
+    dyn = spec.dynamics
+    am = dyn.amortisation
+    if am:
+        for attribute in ("balance", "rate", "payment", "term"):
+            if getattr(am, attribute) == old:
+                setattr(am, attribute, new)
+        am.flat_when = swap(am.flat_when)
+    for index in dyn.indices:
+        index.applies_to = [new if c == old else c for c in index.applies_to]
+    for counter in dyn.counters:
+        if counter.column == old:
+            counter.column = new
+        counter.expr = swap(counter.expr)
+    for accrual in dyn.accruals:
+        if accrual.column == old:
+            accrual.column = new
+        if accrual.add == old:
+            accrual.add = new
+    if dyn.recovery:
+        if dyn.recovery.balance == old:
+            dyn.recovery.balance = new
+        if dyn.recovery.target == old:
+            dyn.recovery.target = new
+
+    target = spec.generation.correlation_target
+    if target:
+        target.columns = [new if c == old else c for c in target.columns]
+
+    for scenario in spec.scenarios.values():
+        scenario.rate_columns = [new if c == old else c for c in scenario.rate_columns]
+
+    if spec.emit.column_order:
+        spec.emit.column_order = [new if c == old else c for c in spec.emit.column_order]
+    spec.validation.non_negative_columns = [
+        new if c == old else c for c in spec.validation.non_negative_columns
+    ]
+    if old in spec.constants:
+        spec.constants[new] = spec.constants.pop(old)
+
+
+# ---------------------------------------------------------------------------
+# configuration — step 3 of the wizard
+# ---------------------------------------------------------------------------
+
+
+def configure(
+    spec: str | Path | dict[str, Any],
+    *,
+    method: str | None = None,
+    profile: dict[str, Any] | None = None,
+    noise: float | None = None,
+    correlation: float | None = None,
+    outliers: float | None = None,
+    missing: float | None = None,
+    periods: int | None = None,
+    freq: str | None = None,
+    default_rate: float | None = None,
+    prepayment_rate: float | None = None,
+    recovery_rate: float | None = None,
+    origination_rate: float | None = None,
+    originations_per_period: int | None = None,
+) -> dict[str, Any]:
+    """Apply the configure form to a spec, and say what each setting did.
+
+    Every control on that form is a change to this document, which is why the
+    YAML tab can show the result rather than being a separate way of doing the
+    same thing. Settings that cannot apply to a particular spec are reported and
+    skipped, not raised: a portfolio with no write-off state should lose its
+    recovery box, not its whole form.
+    """
+    from sdd.age.calibrate import apply_rates, rates
+    from sdd.generate.methods import apply_method
+
+    loaded = load(spec)
+    notes: list[str] = []
+
+    if method and method != loaded.generation.method:
+        loaded, method_notes = apply_method(loaded, method, profile=profile)  # type: ignore[arg-type]
+        notes += method_notes
+
+    gen = loaded.generation
+    for name, value in (
+        ("noise", noise),
+        ("correlation", correlation),
+        ("outliers", outliers),
+        ("missing", missing),
+    ):
+        if value is not None:
+            setattr(gen, name, float(value))
+
+    if gen.correlation_target is None and correlation is not None:
+        notes.append(
+            "Correlation has nothing to reimpose: no sample was analysed, so no relationship "
+            "between columns was ever measured."
+        )
+
+    if periods:
+        loaded.entity.calendar.periods = int(periods)
+    if freq:
+        loaded.entity.calendar.freq = freq  # type: ignore[assignment]
+
+    if origination_rate is not None or originations_per_period is not None:
+        loaded, origination_notes = set_originations(
+            loaded, rate=origination_rate, per_period=originations_per_period
+        )
+        notes += origination_notes
+
+    loaded, rate_notes = apply_rates(
+        loaded,
+        default_rate=default_rate,
+        prepayment_rate=prepayment_rate,
+        recovery_rate=recovery_rate,
+    )
+    notes += rate_notes
+
+    from sdd.generate.randomness import blankable_columns
+
+    optional = blankable_columns(loaded)
+    if missing and not optional:
+        notes.append(
+            "Missing values have nowhere to go: every column is marked required. Mark the ones "
+            "that may be blank as optional in the schema review step."
+        )
+
+    payload = loaded.model_dump(mode="json", exclude_none=True, by_alias=True)
+    return {
+        "spec": payload,
+        "notes": notes,
+        "rates": rates(loaded),
+        "optional_columns": optional,
+        **_verdict(payload),
+    }
+
+
+def _verdict(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validation of an edited spec, under keys that cannot collide with it.
+
+    ``check`` returns the spec *summary* under ``spec``; these functions return
+    the spec *itself* under the same name. Flattening one into the other silently
+    replaces the document with its own description — which then fails to load.
+    """
+    checked = check(payload)
+    return {
+        "valid": checked["valid"],
+        "problems": checked["problems"],
+        "summary": checked["spec"],
+    }
+
+
+def set_originations(
+    spec: Any, *, rate: float | None = None, per_period: int | None = None
+) -> tuple[Any, list[str]]:
+    """Turn an open pool on or off, and say what it will do.
+
+    A rate of zero is how the form says "closed pool", so it removes the section
+    rather than writing a zero into it — a spec that declares originations and
+    then creates none is a spec that lies about its own shape, and the validator
+    would switch to the open-pool checks for nothing.
+    """
+    from sdd.spec.schema import Originations
+
+    out = spec.model_copy(deep=True)
+    wanted = rate if rate is not None else per_period
+
+    if not wanted:
+        if out.originations is None:
+            return out, []
+        out.originations = None
+        return out, ["New loans switched off: the pool is closed, and only shrinks from here."]
+
+    if out.lifecycle is None:
+        return out, [
+            "New loans not applied: this configuration has no lifecycle, so there is no "
+            "ageing for them to join."
+        ]
+
+    existing = out.originations
+    fresh = existing.fresh if existing else True
+    reset_expr = dict(existing.reset_expr) if existing else {}
+    dated = _date_new_loans(out, reset_expr) if fresh else []
+
+    out.originations = Originations(
+        rate=rate if rate else None,
+        per_period=per_period if per_period else None,
+        start_period=existing.start_period if existing else 1,
+        end_period=existing.end_period if existing else None,
+        fresh=fresh,
+        reset=dict(existing.reset) if existing else {},
+        reset_expr=reset_expr,
+    )
+
+    periods = out.entity.calendar.periods
+    window = periods - out.originations.start_period + 1
+    if rate:
+        note = (
+            f"New loans arrive every period at {rate:.1%} of the opening book, across "
+            f"{max(window, 0)} cut-off(s) — roughly {rate * window:.0%} of the opening size "
+            "added in total, before attrition."
+        )
+    else:
+        note = (
+            f"{per_period:,} new loans arrive every period, across {max(window, 0)} cut-off(s) "
+            f"— {per_period * max(window, 0):,} in total, before attrition."
+        )
+
+    notes = [note]
+    if dated:
+        notes.append(
+            f"They are dated to the period they arrive ({', '.join(dated)}), so anything "
+            "computed from an origination date — seasoning, remaining term — follows."
+        )
+    elif fresh:
+        notes.append(
+            "They enter performing with every upward-ticking counter at zero. This "
+            "configuration has no origination-date column, so if it derives seasoning from "
+            "one, set `originations.reset_expr` in the Advanced tab."
+        )
+    return out, notes
+
+
+# Columns that carry the date an entity was written. Matched by name, because
+# nothing in the spec declares which column means "origination date" — and this
+# is the layer where name matching belongs, in front of a user who is told it
+# happened.
+_ORIGINATION_DATE_COLUMNS = {
+    "origination_year": "period_year",
+    "origination_month": "period_month",
+    "origination_day": "period_day",
+}
+
+
+def _date_new_loans(spec: Any, reset_expr: dict[str, str]) -> list[str]:
+    """Point any origination-date column at the period the entity arrives.
+
+    Without this a newly originated loan carries a sampled origination date from
+    years ago, and every column derived from it — seasoning, remaining term —
+    describes a loan that is not new at all.
+    """
+    known = {c.name for c in spec.columns} | {d.target for d in spec.derivations}
+    applied = []
+    for column, expression in _ORIGINATION_DATE_COLUMNS.items():
+        if column in known and column not in reset_expr:
+            reset_expr[column] = expression
+            applied.append(column)
+    return applied
+
+
+def capabilities(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
+    """Which controls this spec can honour, so the UI can disable the rest."""
+    from sdd.age.calibrate import default_states, prepayment_hazard, rates
+    from sdd.generate.randomness import blankable_columns
+
+    loaded = load(spec)
+    lc = loaded.lifecycle
+    return {
+        "optional_columns": blankable_columns(loaded),
+        "ageing": lc is not None,
+        "default_rate": bool(lc and lc.transitions and default_states(loaded)),
+        "prepayment_rate": prepayment_hazard(loaded) is not None,
+        "recovery_rate": bool(lc and lc.terminal),
+        "originations": lc is not None,
+        "origination_rate": (loaded.originations.rate if loaded.originations else None),
+        "originations_per_period": (
+            loaded.originations.per_period if loaded.originations else None
+        ),
+        "correlation": loaded.generation.correlation_target is not None,
+        "scenarios": sorted(loaded.scenarios),
+        "states": lc.states if lc else [],
+        "rates": rates(loaded),
+        "deep_models": _deep_available(),
+    }
+
+
+def _deep_available() -> bool:
+    from importlib.util import find_spec
+
+    return find_spec("sdv") is not None
+
+
+# ---------------------------------------------------------------------------
 # generation
 # ---------------------------------------------------------------------------
 
@@ -280,6 +714,7 @@ def run(
     periods: int | None = None,
     scenario: str | None = None,
     backend: str = "numpy",
+    sample: str | Path | pd.DataFrame | None = None,
     validate_output: bool = True,
     progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
@@ -287,7 +722,8 @@ def run(
 
     ``scenario`` selects a named stress overlay from the spec. ``periods``
     overrides the calendar, which is how a UI offers "how many months?" without
-    editing the spec.
+    editing the spec. ``sample`` is the real tape, needed only by the deep
+    generation methods.
     """
     from sdd.age.panel import run_ageing
     from sdd.generate import build_book
@@ -322,7 +758,22 @@ def run(
         if progress:
             progress(f"book: {stage}", fraction * 0.35)
 
-    book = build_book(loaded, num_records, seed=seed, backend=backend, progress=book_progress)
+    seed_data = None
+    if sample is not None:
+        from sdd.profile import read_sample
+
+        seed_data = sample if isinstance(sample, pd.DataFrame) else read_sample(sample)
+
+    notes: dict[str, Any] = {}
+    book = build_book(
+        loaded,
+        num_records,
+        seed=seed,
+        backend=backend,
+        sample=seed_data,
+        notes=notes,
+        progress=book_progress,
+    )
     book_seconds = time.time() - started
 
     def age_progress(stage: str, fraction: float) -> None:
@@ -348,9 +799,13 @@ def run(
         "base_spec_hash": base_hash,
         "scenario": scenario,
         "seed": seed,
+        "method": loaded.generation.method,
+        "generation_notes": notes,
         "entities": num_records,
         "periods": result["periods"],
         "surviving_entities": result["final_rows"],
+        "originated": result.get("originated", 0),
+        "total_entities": num_records + result.get("originated", 0),
         "files": result["files"],
         "panel": result["panel"],
         "mix": result["mix"],
@@ -437,6 +892,104 @@ def fidelity(
     return {**report.to_dict(), "summary": report.summary()}
 
 
+def charts(
+    spec: str | Path | dict[str, Any],
+    panel: str | Path | pd.DataFrame,
+    *,
+    reference: str | Path | pd.DataFrame | None = None,
+    columns: list[str] | None = None,
+) -> dict[str, Any]:
+    """Every chart the results view draws, aggregated server-side."""
+    from sdd.validate import build_charts
+
+    return build_charts(load(spec), panel, reference, columns=columns)
+
+
+def table(
+    panel: str | Path,
+    *,
+    search: str | None = None,
+    sort: str | None = None,
+    descending: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+    columns: list[str] | None = None,
+) -> dict[str, Any]:
+    """A searchable, sortable window onto a panel, without loading it.
+
+    Backed by duckdb over the parquet file: a browser asking for rows 900-950 of
+    a twelve-million-row panel, sorted by balance, gets them in milliseconds and
+    the panel never enters memory. Identifiers are quoted and the search term is
+    bound as a parameter, because both arrive from a browser.
+    """
+    import duckdb
+
+    path = str(Path(panel))
+    con = duckdb.connect()
+    try:
+        con.execute(f"CREATE TEMP VIEW t AS SELECT * FROM read_parquet('{path}')")
+        available = [row[0] for row in con.execute("DESCRIBE t").fetchall()]
+        picked = [c for c in (columns or available) if c in available] or available
+        quoted = ", ".join(_quote(c) for c in picked)
+
+        where, params = "", []
+        if search:
+            # Cast everything to text and match anywhere: a person searching a
+            # tape is looking for "a loan with 44 in it", not writing SQL.
+            haystack = " || '|' || ".join(
+                f"COALESCE(CAST({_quote(c)} AS VARCHAR), '')" for c in picked
+            )
+            where = f"WHERE {haystack} ILIKE ?"
+            params.append(f"%{search}%")
+
+        total = con.execute(f"SELECT COUNT(*) FROM t {where}", params).fetchone()[0]
+
+        order = ""
+        if sort and sort in available:
+            order = f"ORDER BY {_quote(sort)} {'DESC' if descending else 'ASC'}"
+
+        frame = con.execute(
+            f"SELECT {quoted} FROM t {where} {order} LIMIT {int(limit)} OFFSET {int(offset)}",
+            params,
+        ).fetchdf()
+    finally:
+        con.close()
+
+    return {
+        "columns": picked,
+        "rows": frame.astype(object).where(frame.notna(), None).values.tolist(),
+        "total": int(total),
+        "offset": int(offset),
+        "limit": int(limit),
+    }
+
+
+def _quote(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def export(
+    fmt: str,
+    *,
+    panel: str | Path | None = None,
+    spec: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    out_dir: str | Path,
+    stem: str = "synthetic_data",
+) -> dict[str, Any]:
+    """Produce a downloadable artefact: csv, parquet, xlsx, yaml or report."""
+    from sdd.export import MEDIA_TYPES
+    from sdd.export import export as _export
+
+    path = _export(fmt, panel=panel, spec=spec, result=result, out_dir=out_dir, stem=stem)
+    return {
+        "path": str(path),
+        "name": path.name,
+        "bytes": path.stat().st_size,
+        "media_type": MEDIA_TYPES[fmt],
+    }
+
+
 # ---------------------------------------------------------------------------
 # manifest
 # ---------------------------------------------------------------------------
@@ -466,6 +1019,7 @@ def _write_manifest(out_dir: Path, spec: Any, payload: dict[str, Any]) -> Path:
             "files": len(payload["files"]),
             "panel": payload["panel"],
             "surviving_entities": payload["surviving_entities"],
+            "originated": payload.get("originated", 0),
         },
         "timings": payload["timings"],
         "validation_passed": (payload["validation"] or {}).get("passed"),

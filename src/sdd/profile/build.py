@@ -23,6 +23,7 @@ from sdd.spec.schema import (
     Bucket,
     Calendar,
     Column,
+    CorrelationTarget,
     Counter,
     Derivation,
     DesignSpec,
@@ -30,9 +31,11 @@ from sdd.spec.schema import (
     Dynamics,
     Emit,
     Entity,
+    Generation,
     Index,
     Lifecycle,
     Meta,
+    Originations,
     Validation,
 )
 
@@ -113,6 +116,8 @@ def spec_from_profile(
         derivations=derivations,
         lifecycle=lifecycle,
         dynamics=dynamics,
+        originations=_build_originations(profile, lifecycle),
+        generation=_build_generation(profile, columns),
         emit=Emit(
             filename=f"{name}_{{yyyymm}}.csv",
             column_order=ordered,
@@ -174,6 +179,11 @@ def _build_columns(
                 domain=col.domain if col.domain and len(col.domain) <= 50 else None,
                 min=col.minimum,
                 max=col.maximum,
+                # A column the sample never left blank is treated as required.
+                # The reverse is not assumed: an optional column is *allowed* to
+                # be blank, and only becomes blank if someone asks for missing
+                # values, so a profiled spec reproduces the sample by default.
+                required=col.nulls == 0,
                 confidence=round(col.confidence, 3),
                 review=note,
             )
@@ -203,6 +213,50 @@ def _build_columns(
             review.append(f.name)
 
     return columns, constants, review
+
+
+def _build_originations(
+    profile: DatasetProfile, lifecycle: Lifecycle | None
+) -> Originations | None:
+    """Carry an observed open pool into the spec.
+
+    Recorded as a *rate* rather than a count, so the setting still means the same
+    thing when the spec is run at a different scale: a book taking on 2% of its
+    opening size every month does that whether it opens with 5,000 loans or
+    500,000.
+
+    Skipped without a lifecycle, because there would be no ageing for the new
+    entities to join — the spec would declare arrivals that never arrive.
+    """
+    learned = profile.dynamics.get("originations")
+    if not learned or lifecycle is None or learned["rate"] <= 0:
+        return None
+    return Originations(
+        rate=round(learned["rate"], 6),
+        start_period=learned.get("start_period", 1),
+        fresh=bool(learned.get("fresh", True)),
+    )
+
+
+def _build_generation(profile: DatasetProfile, columns: list[Column]) -> Generation:
+    """Carry the sample's joint structure into the spec.
+
+    The generators above are marginals — each column fitted on its own. Recording
+    the observed rank correlation is what lets the engine put the joint structure
+    back afterwards, and what makes the correlation control in the UI mean
+    something measurable rather than decorative.
+    """
+    target = None
+    measured = profile.correlation
+    if measured:
+        declared = {c.name for c in columns}
+        keep = [i for i, name in enumerate(measured["columns"]) if name in declared]
+        if len(keep) >= 2:
+            target = CorrelationTarget(
+                columns=[measured["columns"][i] for i in keep],
+                matrix=[[measured["matrix"][i][j] for j in keep] for i in keep],
+            )
+    return Generation(method="distribution", correlation_target=target)
 
 
 def _build_buckets(profile: DatasetProfile) -> tuple[dict[str, Bucket], list[Derivation]]:
@@ -324,25 +378,43 @@ def _build_dynamics(profile: DatasetProfile, lifecycle: Lifecycle | None) -> Dyn
         only_when = am.get("only_when_state") or None
         if only_when and lifecycle:
             only_when = [s for s in only_when if s in lifecycle.states] or None
+        # An amortisation rule is only as good as the columns behind it, and a
+        # tape that carries neither a payment nor a remaining term cannot support
+        # one at all. Falling back through the kinds — annuity, then linear, then
+        # a frozen balance — keeps the spec runnable instead of producing one that
+        # fails its own validation on the first load.
+        kind = am["kind"]
+        payment, term = am.get("payment"), am.get("term")
+        if kind == "annuity" and not (am.get("rate") and payment):
+            kind = "linear"
+        if kind == "linear" and not (payment or term):
+            kind = "interest_only"
+
         amortisation = Amortisation(
-            kind=am["kind"],
+            kind=kind,
             balance=am["balance"],
-            rate=am.get("rate"),
-            payment=am.get("payment"),
+            rate=am.get("rate") if kind == "annuity" else None,
+            payment=payment,
+            term=term if kind in ("linear", "bullet") else None,
             only_when_state=only_when,
-            # A learned kind without both inputs cannot be an annuity.
             **(
                 {"rate_per_period": max(0.0, 1.0 - am.get("median_period_ratio", 1.0))}
-                if am["kind"] in ("revolving", "depreciation")
+                if kind in ("revolving", "depreciation")
                 else {}
             ),
         )
-        if amortisation.kind == "annuity" and not (amortisation.rate and amortisation.payment):
-            amortisation = Amortisation(kind="linear", balance=am["balance"])
 
+    # A balance that fell by the same amount every period looks exactly like a
+    # counter, and the panel learner reports it as one. Keeping both would make
+    # the spec contradict itself: the ageing loop runs counters first and
+    # amortisation second, so amortisation wins, and the invariant asserting the
+    # counter's fixed step then fails against the engine's own output.
+    # Amortisation owns the balance.
+    owned = {amortisation.balance} if amortisation else set()
     counters = [
         Counter(column=c["column"], step=c["step"], clip_min=0 if c["step"] < 0 else None)
         for c in learned.get("counters", [])
+        if c["column"] not in owned
     ]
 
     indices = [
@@ -383,12 +455,17 @@ def build_spec(
     time_column: str | None = None,
     state_column: str | None = None,
     periods: int | None = None,
+    max_rows: int | None = None,
     **kwargs: Any,
 ) -> tuple[DesignSpec, DatasetProfile]:
     """Profile a sample and build a spec from it in one call.
 
     Returns both, because the profile carries the evidence behind every choice
     the spec makes and a caller usually wants to show them together.
+
+    ``max_rows`` caps how much of the sample is read. Distribution shapes settle
+    long before a tape is exhausted, so a caller with someone waiting — the web
+    UI — can bound the wait without meaningfully changing the answer.
     """
     from sdd.profile.profiler import profile_dataset
     from sdd.profile.template import load_template
@@ -396,7 +473,11 @@ def build_spec(
     tmpl = load_template(structure) if isinstance(structure, str) else structure
 
     profile = profile_dataset(
-        data, id_column=id_column, time_column=time_column, state_column=state_column
+        data,
+        id_column=id_column,
+        time_column=time_column,
+        state_column=state_column,
+        max_rows=max_rows,
     )
     spec = spec_from_profile(profile, template=tmpl, name=name, periods=periods, **kwargs)
     return spec, profile

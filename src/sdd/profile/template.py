@@ -144,17 +144,84 @@ def parse_format_hint(hint: str | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+TEMPLATE_SUFFIXES = (
+    ".json",
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".parquet",
+    ".pq",
+    ".xlsx",
+    ".xlsm",
+    ".xls",
+)
+
+
 def load_template(path: str | Path, *, name_field: str = "field_name") -> Template:
     """Load a structure definition, detecting the format from the file."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".json":
-        return load_taxonomy_json(path, name_field=name_field)
+        return load_json_template(path, name_field=name_field)
     if suffix in (".csv", ".tsv", ".txt"):
         return load_csv_template(path)
+    if suffix in (".parquet", ".pq"):
+        return load_parquet_template(path)
+    if suffix in (".xlsx", ".xlsm", ".xls"):
+        return load_frame_template(pd.read_excel(path, nrows=200), name=path.stem, source=str(path))
     raise ValueError(
-        f"cannot read a structure definition from {path.suffix!r}; "
-        "expected .json (taxonomy), or .csv (header or data dictionary)"
+        f"cannot read a schema definition from {path.suffix!r}; expected "
+        ".csv, .parquet, .xlsx or .json"
+    )
+
+
+def load_json_template(path: str | Path, *, name_field: str = "field_name") -> Template:
+    """Read a JSON schema, whether it is a taxonomy or a handful of sample rows.
+
+    A taxonomy describes fields (``field_name``, ``format_hint``); a data extract
+    *is* rows. Both arrive as JSON from the same upload box, so the shape decides
+    which reader runs rather than the user having to say.
+    """
+    path = Path(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    entries = raw.get("fields", raw) if isinstance(raw, dict) else raw
+
+    if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+        keys = set(entries[0])
+        if not ({"field_name", "field_code", "format_hint", "name"} & keys):
+            # Row objects, not field definitions: the schema is their keys.
+            return load_frame_template(pd.json_normalize(entries), name=path.stem, source=str(path))
+    return load_taxonomy_json(path, name_field=name_field)
+
+
+def load_parquet_template(path: str | Path) -> Template:
+    """Read a parquet schema — column names with their declared physical types."""
+    import pyarrow.parquet as pq
+
+    path = Path(path)
+    schema = pq.read_schema(path)
+    return Template(
+        name=path.stem,
+        fields=[
+            FieldSpec(name=str(name), dtype=_dtype_from_arrow(str(field_type)))
+            for name, field_type in zip(schema.names, schema.types, strict=False)
+        ],
+        source=str(path),
+    )
+
+
+def load_frame_template(frame: pd.DataFrame, *, name: str, source: str | None = None) -> Template:
+    """Read a schema from an in-memory table: a data dictionary, or a header."""
+    dictionary = _as_data_dictionary(frame, name=name, source=source)
+    if dictionary is not None:
+        return dictionary
+    return Template(
+        name=name,
+        fields=[
+            FieldSpec(name=str(c).strip(), dtype=_dtype_from_pandas(frame[c]))
+            for c in frame.columns
+        ],
+        source=source,
     )
 
 
@@ -207,9 +274,29 @@ def load_taxonomy_json(path: str | Path, *, name_field: str = "field_name") -> T
 def load_csv_template(path: str | Path) -> Template:
     """Read either a bare header row or a data dictionary."""
     path = Path(path)
-    head = pd.read_csv(path, nrows=50)
-    lowered = {str(c).strip().lower(): c for c in head.columns}
+    sep = "\t" if path.suffix.lower() == ".tsv" else ","
+    head = pd.read_csv(path, nrows=200, sep=sep)
+    dictionary = _as_data_dictionary(head, name=path.stem, source=str(path))
+    if dictionary is not None:
+        return dictionary
+    return Template(
+        name=path.stem,
+        fields=[
+            FieldSpec(name=str(c).strip(), dtype=_dtype_from_pandas(head[c])) for c in head.columns
+        ],
+        source=str(path),
+    )
 
+
+def _as_data_dictionary(frame: pd.DataFrame, *, name: str, source: str | None) -> Template | None:
+    """Read a table *describing* columns, or return None if it holds data instead.
+
+    A data dictionary has a name column and something saying what each field is;
+    a tape has neither. Getting this wrong in either direction is expensive — a
+    dictionary read as data produces a two-column schema, and a tape read as a
+    dictionary produces one field per row — so both markers are required.
+    """
+    lowered = {str(c).strip().lower(): c for c in frame.columns}
     name_key = next(
         (
             lowered[k]
@@ -219,37 +306,63 @@ def load_csv_template(path: str | Path) -> Template:
         None,
     )
     type_key = next(
-        (lowered[k] for k in ("type", "dtype", "data_type", "format") if k in lowered), None
+        (
+            lowered[k]
+            for k in ("type", "dtype", "data_type", "format", "format_hint")
+            if k in lowered
+        ),
+        None,
     )
+    desc_key = next(
+        (lowered[k] for k in ("description", "content_to_report", "comment") if k in lowered),
+        None,
+    )
+    if not name_key or not (type_key or desc_key):
+        return None
 
-    # A data dictionary has a name column *and* something describing each field;
-    # a bare header just has the columns themselves.
-    if name_key and (type_key or any(k in lowered for k in ("description", "content_to_report"))):
-        desc_key = next(
-            (lowered[k] for k in ("description", "content_to_report", "comment") if k in lowered),
-            None,
-        )
-        full = pd.read_csv(path)
-        fields = [
-            FieldSpec(
-                name=str(row[name_key]).strip(),
-                dtype=_normalise_dtype(str(row[type_key]))
+    fields = [
+        FieldSpec(
+            name=str(row[name_key]).strip(),
+            dtype=(
+                _normalise_dtype(str(row[type_key]))
                 if type_key and pd.notna(row.get(type_key))
-                else None,
-                description=_shorten(str(row[desc_key]))
-                if desc_key and pd.notna(row.get(desc_key))
-                else None,
-            )
-            for _, row in full.iterrows()
-            if pd.notna(row.get(name_key))
-        ]
-        return Template(name=path.stem, fields=fields, source=str(path))
+                else None
+            ),
+            description=(
+                _shorten(str(row[desc_key])) if desc_key and pd.notna(row.get(desc_key)) else None
+            ),
+        )
+        for _, row in frame.iterrows()
+        if pd.notna(row.get(name_key))
+    ]
+    return Template(name=name, fields=fields, source=source) if fields else None
 
-    return Template(
-        name=path.stem,
-        fields=[FieldSpec(name=str(c).strip()) for c in head.columns],
-        source=str(path),
-    )
+
+def _dtype_from_pandas(series: pd.Series) -> DType | None:
+    if pd.api.types.is_bool_dtype(series):
+        return "bool"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "date"
+    if pd.api.types.is_integer_dtype(series):
+        return "int"
+    if pd.api.types.is_float_dtype(series):
+        return "float"
+    return None
+
+
+def _dtype_from_arrow(arrow_type: str) -> DType | None:
+    text = arrow_type.lower()
+    if text.startswith("bool"):
+        return "bool"
+    if text.startswith(("timestamp", "date")):
+        return "date"
+    if text.startswith(("int", "uint")):
+        return "int"
+    if text.startswith(("float", "double", "decimal")):
+        return "float"
+    if text.startswith(("string", "large_string", "utf8")):
+        return "str"
+    return None
 
 
 def template_from_columns(names: list[str], *, name: str = "columns") -> Template:

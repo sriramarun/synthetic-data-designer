@@ -231,3 +231,32 @@ def test_unquoted_yaml_date_is_accepted(tmp_path, minimal_spec_dict):
     path = tmp_path / "spec.yaml"
     path.write_text(yaml.safe_dump(raw).replace("start: '2024-01-31'", "start: 2024-01-31"))
     assert load_spec(path).entity.calendar.start == "2024-01-31"
+
+
+def test_a_counter_on_the_amortising_balance_is_refused(minimal_spec_dict):
+    """Two rules writing one column each period is an override, not a merge.
+
+    The ageing loop applies counters before amortisation, so amortisation wins
+    and the counter's declared step becomes a claim the validator then reports
+    against the engine's own output. Better to refuse the spec.
+    """
+    raw = copy.deepcopy(minimal_spec_dict)
+    raw["dynamics"] = {
+        "amortisation": {"kind": "linear", "balance": "balance", "payment": "balance"},
+        "counters": [{"column": "balance", "step": -100}],
+    }
+    with pytest.raises(SpecError, match="already moves that column"):
+        load_spec_dict(raw)
+
+
+def test_a_derivation_may_rewrite_a_column_that_already_has_a_value(minimal_spec_dict):
+    """`x = x + 1` is a cycle only when nothing else gives x a value.
+
+    Where x is a sampled column, it is an ordinary rewrite — and it is exactly
+    what a stress scenario emits to shift a rate column that was sampled a
+    moment earlier. Rejecting it made `scenarios.rate_shift` unusable.
+    """
+    raw = copy.deepcopy(minimal_spec_dict)
+    raw["derivations"].append({"target": "balance", "expr": "balance + 100"})
+    spec = load_spec_dict(raw)
+    assert spec.derivations[-1].target == "balance"

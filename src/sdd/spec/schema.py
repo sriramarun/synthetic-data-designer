@@ -52,6 +52,11 @@ class _Base(BaseModel):
 
 class Meta(_Base):
     name: str
+    title: str | None = Field(
+        default=None,
+        description="Human-readable name, shown wherever a person picks this spec. `name` is "
+        "the identifier — short, lowercase, used in filenames — and makes a poor label.",
+    )
     asset_class: str = "generic"
     regulatory_template: str | None = None
     description: str | None = None
@@ -265,6 +270,10 @@ DType = Literal["int", "float", "str", "category", "bool", "date"]
 class Column(_Base):
     """One output column.
 
+    ``required`` and ``null_rate`` are the schema-review knobs: a required column
+    is never blanked, an optional one may be, and ``null_rate`` overrides the
+    global missing-value rate for this column alone.
+
     ``role`` drives both generation and validation:
 
     ``static``
@@ -292,6 +301,16 @@ class Column(_Base):
     )
     min: float | None = None
     max: float | None = None
+    required: bool = Field(
+        default=True,
+        description="A required column is never blanked by the missing-value setting.",
+    )
+    null_rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Share of rows blanked in this column, overriding generation.missing.",
+    )
     confidence: float | None = Field(
         default=None,
         ge=0.0,
@@ -711,11 +730,118 @@ class Accrual(_Base):
         return self
 
 
+class Recovery(_Base):
+    """What comes back after a write-off.
+
+    A defaulted loan is not a total loss: the collateral is sold and part of the
+    balance is recovered. Booked in the period the entity enters one of
+    ``on_states``, as ``rate`` x the balance it carried on the way in.
+    """
+
+    rate: float = Field(ge=0.0, le=1.0, description="Share of the balance recovered.")
+    balance: str = Field(description="Column holding the balance being recovered against.")
+    target: str = Field(
+        default="recovery_amount",
+        description="Column the recovered amount is written to. Created if absent.",
+    )
+    on_states: list[str] = Field(
+        default_factory=list,
+        description="States that trigger the recovery. Defaults to the terminal states "
+        "reachable from an absorbing one — the write-off states.",
+    )
+
+
 class Dynamics(_Base):
     amortisation: Amortisation | None = None
     indices: list[Index] = Field(default_factory=list)
     counters: list[Counter] = Field(default_factory=list)
     accruals: list[Accrual] = Field(default_factory=list)
+    recovery: Recovery | None = None
+
+
+# ---------------------------------------------------------------------------
+# originations — an open pool
+# ---------------------------------------------------------------------------
+
+
+class Originations(_Base):
+    """New entities joining the pool while it ages.
+
+    Without this the pool is *closed*: every loan exists at the first cut-off and
+    the pool only shrinks as loans redeem and write off. That is the right model
+    for a static securitisation, and the wrong one for almost everything else — a
+    lender keeps lending, a revolving deal keeps buying receivables, and a
+    portfolio observed over two years contains loans written in both.
+
+    Give either ``per_period`` (a fixed count) or ``rate`` (a share of the
+    opening book, so the setting survives a change in scale). New entities are
+    drawn from the same generators as the opening book, so they look like the
+    portfolio they are joining, and enter at the cut-off they are created on.
+    """
+
+    per_period: int | None = Field(default=None, ge=0, description="New entities each period.")
+    rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="New entities each period as a share of the opening book, e.g. 0.02 for 2%.",
+    )
+    start_period: int = Field(
+        default=1,
+        ge=1,
+        description="First cut-off new entities appear at. Period 0 is the opening book itself.",
+    )
+    end_period: int | None = Field(
+        default=None, ge=1, description="Last cut-off they appear at. Default: every period."
+    )
+    fresh: bool = Field(
+        default=True,
+        description=(
+            "Treat new entities as newly originated rather than acquired. Sets them to the "
+            "healthiest lifecycle state and zeroes every counter that ticks upward, because "
+            "a counter that rises each period measures elapsed time and no time has elapsed. "
+            "Counters that tick downward keep their sampled value — a new entity's remaining "
+            "term is drawn from the book's own distribution."
+        ),
+    )
+    reset: dict[str, Any] = Field(
+        default_factory=dict,
+        description="column -> literal value forced on a new entity, applied after `fresh`.",
+    )
+    reset_expr: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "column -> expression, evaluated for each arriving cohort with the joining "
+            "period available as `period`, `period_year`, `period_month` and `period_day`. "
+            "This is how a loan written in June is given June's origination date: reset the "
+            "date a derivation reads, and the columns computed from it follow. Resetting a "
+            "derived column directly does not work — the derivation recomputes it."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> Originations:
+        if (self.per_period is None) == (self.rate is None):
+            raise ValueError(
+                "originations needs exactly one of `per_period` (a fixed count) or `rate` "
+                "(a share of the opening book)"
+            )
+        if self.end_period is not None and self.end_period < self.start_period:
+            raise ValueError(
+                f"originations end_period {self.end_period} is before start_period "
+                f"{self.start_period}, so no entity would ever be created"
+            )
+        return self
+
+    def count_for(self, period: int, opening_size: int) -> int:
+        """How many entities join at ``period``. Zero outside the window."""
+        if period < self.start_period:
+            return 0
+        if self.end_period is not None and period > self.end_period:
+            return 0
+        if self.per_period is not None:
+            return int(self.per_period)
+        assert self.rate is not None
+        return round(opening_size * self.rate)
 
 
 # ---------------------------------------------------------------------------
@@ -747,6 +873,93 @@ class Scenario(_Base):
         default=0.0, description="Additive shift, in percentage points, to interest-rate columns."
     )
     rate_columns: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# generation method and randomness
+# ---------------------------------------------------------------------------
+
+GenerationMethod = Literal[
+    "statistical",  # moment-matched normals: mean and spread kept, shape simplified
+    "distribution",  # the fitted named distribution per column (the profiler's choice)
+    "rule_based",  # bounds and domains only, no fitted shape
+    "sampling",  # resample the observed values, shape and spikes intact
+    "ctgan",  # deep tabular model trained on the sample, joint structure learned
+    "hybrid",  # distribution first, deep polish second
+]
+
+
+class CorrelationTarget(_Base):
+    """The rank correlation observed between numeric columns in the sample.
+
+    Marginal-by-marginal sampling produces independent columns. This records what
+    the real data did, so :mod:`sdd.generate.randomness` can reimpose it by
+    reordering — which changes how columns move together without touching any
+    column's own distribution.
+    """
+
+    columns: list[str]
+    matrix: list[list[float]]
+
+    @model_validator(mode="after")
+    def _check(self) -> CorrelationTarget:
+        n = len(self.columns)
+        if len(self.matrix) != n or any(len(row) != n for row in self.matrix):
+            raise ValueError(
+                f"correlation target covers {n} column(s) so the matrix must be {n}x{n}"
+            )
+        if any(abs(v) > 1.0 + 1e-9 for row in self.matrix for v in row):
+            raise ValueError("correlation entries must lie between -1 and 1")
+        return self
+
+
+class Generation(_Base):
+    """How period-0 values are drawn, and how much randomness is layered on top.
+
+    ``method`` selects the sampler; the four rates below are applied after
+    sampling, in this order: correlation, outliers, noise, missing values. Each
+    is a share, so 0 means "leave it alone".
+    """
+
+    method: GenerationMethod = "distribution"
+    noise: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Gaussian jitter added to numeric columns, as a share of each column's "
+        "own standard deviation.",
+    )
+    correlation: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="How much of `correlation_target` to reimpose. 0 leaves columns "
+        "independent, 1 matches the sample.",
+    )
+    outliers: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.2,
+        description="Share of rows pushed into the tail of a numeric column.",
+    )
+    outlier_sigma: float = Field(
+        default=4.0, gt=0.0, description="How far into the tail an outlier is pushed."
+    )
+    missing: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.9,
+        description="Share of values blanked in optional columns. Identifiers, dates, "
+        "the state column and anything a state pins a value to are never blanked.",
+    )
+    correlation_target: CorrelationTarget | None = None
+    polish_model: Literal["ctgan", "tvae"] = "ctgan"
+    polish_epochs: int = Field(default=300, ge=1)
+
+    @property
+    def needs_sample(self) -> bool:
+        """True when the method cannot run without the original tape."""
+        return self.method in ("ctgan", "hybrid")
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +1029,8 @@ class DesignSpec(_Base):
     buckets: dict[str, Bucket] = Field(default_factory=dict)
     lifecycle: Lifecycle | None = None
     dynamics: Dynamics = Field(default_factory=Dynamics)
+    generation: Generation = Field(default_factory=Generation)
+    originations: Originations | None = None
     scenarios: dict[str, Scenario] = Field(default_factory=dict)
     emit: Emit = Field(default_factory=Emit)
     validation: Validation = Field(default_factory=Validation)
@@ -857,4 +1072,45 @@ class DesignSpec(_Base):
         dupes = sorted({n for n in names if names.count(n) > 1})
         if dupes:
             raise ValueError(f"duplicate column names: {dupes}")
+
+        known = set(names) | set(self.constants) | {d.target for d in self.derivations}
+
+        target = self.generation.correlation_target
+        if target:
+            unknown = [c for c in target.columns if c not in known]
+            if unknown:
+                raise ValueError(
+                    f"generation.correlation_target names columns this spec does not "
+                    f"declare: {unknown}"
+                )
+
+        if self.originations:
+            if self.lifecycle is None:
+                raise ValueError(
+                    "originations needs a lifecycle: new entities join the pool while it ages, "
+                    "and without states there is no ageing for them to join"
+                )
+            for field_name, mapping in (
+                ("reset", self.originations.reset),
+                ("reset_expr", self.originations.reset_expr),
+            ):
+                unknown = [c for c in mapping if c not in known]
+                if unknown:
+                    raise ValueError(f"originations.{field_name} names unknown columns: {unknown}")
+
+        recovery = self.dynamics.recovery
+        if recovery:
+            if recovery.balance not in known:
+                raise ValueError(
+                    f"dynamics.recovery reads balance from {recovery.balance!r}, "
+                    "which this spec does not declare"
+                )
+            if self.lifecycle is None:
+                raise ValueError(
+                    "dynamics.recovery needs a lifecycle: recovery is booked when an entity "
+                    "reaches a write-off state, and without states there are none"
+                )
+            unknown = [s for s in recovery.on_states if s not in set(self.lifecycle.states)]
+            if unknown:
+                raise ValueError(f"dynamics.recovery names unknown states: {unknown}")
         return self

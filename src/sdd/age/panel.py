@@ -91,9 +91,16 @@ def run_ageing(
     mixes: list[dict] = []
     frames: list[pd.DataFrame] = []
 
+    opening_size = len(current)
+    # Identifiers continue from the opening book, so a later cohort cannot be
+    # handed an identifier an existing entity already holds.
+    next_index = opening_size
+    originated = 0
+
     for period, date in enumerate(dates):
+        joined = 0
         if period > 0:
-            if current.empty:
+            if current.empty and spec.originations is None:
                 break
             current, dwell, accrual_counters = _step(
                 spec,
@@ -108,10 +115,33 @@ def run_ageing(
                 index_shift=index_shift,
                 performing_state=performing_state,
             )
+            if spec.originations is not None:
+                current, dwell, accrual_counters, joined = originate(
+                    spec,
+                    engine,
+                    current,
+                    dwell,
+                    accrual_counters,
+                    period=period,
+                    date=date,
+                    rng=rng,
+                    opening_size=opening_size,
+                    next_index=next_index,
+                )
+                next_index += joined
+                originated += joined
 
         out = to_output(spec, current)
         mix = current[lc.state_column].value_counts().to_dict()
-        mixes.append({"period": period, "date": date.strftime("%Y-%m-%d"), "rows": len(out), **mix})
+        mixes.append(
+            {
+                "period": period,
+                "date": date.strftime("%Y-%m-%d"),
+                "rows": len(out),
+                "originated": joined,
+                **mix,
+            }
+        )
 
         if write_files:
             written += _write_period(spec, out, date, period, out_path)
@@ -141,6 +171,8 @@ def run_ageing(
         "panel": str(panel_path) if panel_path else None,
         "mix": mixes,
         "final_rows": len(current),
+        "opening_entities": opening_size,
+        "originated": originated,
     }
 
 
@@ -203,6 +235,12 @@ def _step(
             annual_shift=index_shift,
         )
 
+    # 4b. recovery — booked on the way into a write-off state, from the balance
+    # the entity carried in. Computed before `state_fields`, which is usually
+    # what zeroes that balance.
+    if spec.dynamics.recovery:
+        df = apply_recovery(spec, df, previous=engine.to_label(prev_idx), current=labels)
+
     # 5. accruals
     if spec.dynamics.accruals:
         df, accrual_counters = apply_accruals(
@@ -223,6 +261,145 @@ def _step(
     df = coerce_dtypes(spec, df)
 
     return df, dwell, accrual_counters
+
+
+def originate(
+    spec: DesignSpec,
+    engine: LifecycleEngine,
+    df: pd.DataFrame,
+    dwell: dict[str, np.ndarray],
+    accrual_counters: dict[str, np.ndarray],
+    *,
+    period: int,
+    date: pd.Timestamp,
+    rng: np.random.Generator,
+    opening_size: int,
+    next_index: int,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray], int]:
+    """Add the entities joining the pool at this cut-off.
+
+    They are built by the same book builder as the opening cohort, so they are
+    drawn from the same distributions and carry the same derived columns — a new
+    loan looks like the portfolio it is joining. Three things differ:
+
+    *They enter at this cut-off, not the first.* The time column is stamped with
+    this period's date rather than the calendar's start.
+
+    *They have not been aged.* This runs after the whole ageing step, so a loan
+    written this month is not also charged a month of interest this month.
+
+    *Under ``fresh`` they are new, not acquired.* The healthiest state, and every
+    upward-ticking counter set to zero — a counter that rises each period
+    measures elapsed time, and none has elapsed for a loan written today.
+    """
+    plan = spec.originations
+    assert plan is not None
+    count = plan.count_for(period, opening_size)
+    if count < 1:
+        return df, dwell, accrual_counters, 0
+
+    from sdd.generate.book import build_book
+
+    # Drawn from the run's own generator so the whole panel reproduces from one
+    # seed, and differs period to period.
+    cohort_seed = int(rng.integers(0, 2**32 - 1))
+    new = build_book(
+        spec,
+        count,
+        seed=cohort_seed,
+        id_offset=next_index,
+        at=date.strftime("%Y-%m-%d"),
+    )
+
+    lc = spec.lifecycle
+    assert lc is not None
+    if plan.fresh:
+        new[lc.state_column] = lc.states[0]
+        for counter in spec.dynamics.counters:
+            if counter.step is not None and counter.step > 0 and counter.column in new.columns:
+                new[counter.column] = 0
+    for column, value in plan.reset.items():
+        new[column] = value
+    if plan.reset_expr:
+        from sdd.generate.deriver import evaluate_on
+
+        env = {
+            **spec.params,
+            "period": period,
+            "period_year": date.year,
+            "period_month": date.month,
+            "period_day": date.day,
+        }
+        for column, expression in plan.reset_expr.items():
+            try:
+                new[column] = evaluate_on(expression, new, env)
+            except Exception as exc:
+                raise AgeingError(f"originations.reset_expr for {column!r} failed: {exc}") from exc
+
+    labels = new[lc.state_column].to_numpy()
+    new = apply_state_fields(spec, new, labels)
+    # Re-derived after the resets, so a ratio computed at origination matches the
+    # values the entity actually enters with.
+    new = apply_derivations(spec, new, stage="book")
+    new = coerce_dtypes(spec, new)
+
+    missing = [c for c in df.columns if c not in new.columns]
+    if missing:
+        raise AgeingError(
+            f"the entities joining at period {period} are missing columns the pool already "
+            f"has: {missing}"
+        )
+    new = new[list(df.columns)]
+
+    id_column = spec.entity.id_column
+    clashing = set(new[id_column]) & set(df[id_column])
+    if clashing:
+        raise AgeingError(
+            f"{len(clashing)} entity identifier(s) created at period {period} already exist in "
+            f"the pool, e.g. {sorted(clashing)[:3]}. An open pool needs identifiers that cannot "
+            f"repeat: give `entity.id_format` a '{{seq}}' placeholder, or generate "
+            f"{id_column!r} with a `sequence` or `uuid` generator"
+        )
+
+    joined_dwell = engine.initial_dwell(len(new), engine.to_idx(labels))
+    dwell = {
+        name: np.concatenate([values, joined_dwell.get(name, np.zeros(len(new), dtype=np.int32))])
+        for name, values in dwell.items()
+    }
+    joined_counters = seed_accrual_counters(new, spec.dynamics.accruals, _dpd_column(spec))
+    accrual_counters = {
+        name: np.concatenate(
+            [values, joined_counters.get(name, np.zeros(len(new), dtype=values.dtype))]
+        )
+        for name, values in accrual_counters.items()
+    }
+
+    return pd.concat([df, new], ignore_index=True), dwell, accrual_counters, len(new)
+
+
+def apply_recovery(
+    spec: DesignSpec, df: pd.DataFrame, *, previous: np.ndarray, current: np.ndarray
+) -> pd.DataFrame:
+    """Book the recovered share of the balance for entities writing off this period.
+
+    Only entities *entering* a recovery state are booked. Without that test an
+    absorbing state would book a recovery every period an entity sat in it, and
+    a pool would recover several times what it lost.
+    """
+    rec = spec.dynamics.recovery
+    assert rec is not None
+    if rec.balance not in df.columns:
+        raise AgeingError(
+            f"dynamics.recovery reads {rec.balance!r}, which is not in the panel at this point"
+        )
+
+    entering = np.isin(current, rec.on_states) & (current != previous)
+    # to_numpy before filling: a balance column can arrive as object dtype, and
+    # pandas' own fillna would downcast it with a deprecation warning.
+    balance = np.nan_to_num(pd.to_numeric(df[rec.balance], errors="coerce").to_numpy(dtype=float))
+    booked = np.where(entering, np.round(balance * rec.rate, 2), 0.0)
+    df[rec.target] = booked
+    return df
 
 
 def apply_state_fields(spec: DesignSpec, df: pd.DataFrame, labels: np.ndarray) -> pd.DataFrame:
@@ -291,33 +468,18 @@ def _scenario_knobs(
 
 
 def stress_transitions(spec: DesignSpec, scenario: Scenario) -> list[list[float]] | None:
-    """Scale the probability of *worsening* and renormalise each row.
+    """Scale the probability of *worsening* under a scenario overlay.
 
-    "Worsening" means moving to a state later in the declared order — the spec is
-    expected to list states best-first, which every delinquency ladder already
-    does. Probability taken from the worsening cells is removed proportionally
-    from the rest of the row, so each row still sums to 1.
+    The same rescaling the configure form uses to hit a target default rate, so a
+    scenario and a hand-set rate cannot drift into meaning different things.
     """
     lc = spec.lifecycle
     if lc is None or lc.transitions is None or scenario.default_multiplier == 1.0:
         return None if lc is None else lc.transitions
 
-    matrix = np.asarray(lc.transitions, dtype=float).copy()
-    n = matrix.shape[0]
-    for i in range(n):
-        worse = np.zeros(n, dtype=bool)
-        worse[i + 1 :] = True
-        before = matrix[i, worse].sum()
-        if before <= 0:
-            continue
-        after = float(np.clip(before * scenario.default_multiplier, 0.0, 0.999999))
-        matrix[i, worse] *= after / before
-        rest = ~worse
-        rest_before = matrix[i, rest].sum()
-        if rest_before > 0:
-            matrix[i, rest] *= (1.0 - after) / rest_before
-        matrix[i] /= matrix[i].sum()
-    return matrix.tolist()
+    from sdd.age.calibrate import scale_worsening
+
+    return scale_worsening(lc.transitions, scenario.default_multiplier)
 
 
 def _dpd_column(spec: DesignSpec) -> str | None:

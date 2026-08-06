@@ -20,6 +20,7 @@ number can be judged rather than trusted blindly.
 
 from __future__ import annotations
 
+import itertools
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -72,6 +73,10 @@ def learn_panel_dynamics(
     attrition = learn_attrition(df, eid, etime)
     if attrition:
         out["attrition"] = attrition
+
+    originations = learn_originations(ordered, eid, etime, profile)
+    if originations:
+        out["originations"] = originations
 
     counters = learn_counters(ordered, eid, profile)
     if counters:
@@ -267,33 +272,118 @@ def _renormalise(row: list[float]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
+def _entities_by_period(df: pd.DataFrame, id_column: str, time_column: str) -> list[set[Any]]:
+    """The set of entities reported at each cut-off, in order."""
+    periods = sorted(df[time_column].dropna().unique())
+    grouped = df.groupby(time_column)[id_column]
+    return [set(grouped.get_group(period).unique()) for period in periods]
+
+
 def learn_attrition(df: pd.DataFrame, id_column: str, time_column: str) -> dict[str, Any] | None:
     """Measure how fast entities leave the pool.
+
+    Counted as *departures* — entities reported at one cut-off and absent at the
+    next — rather than as the change in pool size. The two are the same number
+    for a closed pool and very different for an open one: a pool taking on as
+    many loans as it loses has zero net change and a perfectly ordinary
+    prepayment rate, and measuring the net would report it as zero.
 
     The per-period rate is converted to an annualised one, since that is how
     prepayment is quoted and calibrated in practice.
     """
-    periods = sorted(df[time_column].dropna().unique())
-    if len(periods) < 2:
+    cohorts = _entities_by_period(df, id_column, time_column)
+    if len(cohorts) < 2:
         return None
 
-    counts = df.groupby(time_column)[id_column].nunique().reindex(periods)
-    survivals = []
-    for before, after in zip(counts.to_numpy()[:-1], counts.to_numpy()[1:], strict=True):
-        if before > 0:
-            survivals.append(after / before)
-    if not survivals:
+    departures = []
+    for before, after in itertools.pairwise(cohorts):
+        if before:
+            departures.append(len(before - after) / len(before))
+    if not departures:
         return None
 
-    survival = float(np.mean(survivals))
-    per_period = max(0.0, 1.0 - survival)
+    per_period = float(np.clip(np.mean(departures), 0.0, 1.0))
     annual = 1.0 - (1.0 - per_period) ** 12 if per_period < 1 else 1.0
     return {
         "period_rate": round(per_period, 6),
         "annual_rate": round(min(annual, 0.999), 6),
-        "periods_observed": len(periods),
-        "confidence": 0.8 if len(periods) >= 6 else 0.4,
+        "periods_observed": len(cohorts),
+        "confidence": 0.8 if len(cohorts) >= 6 else 0.4,
     }
+
+
+def learn_originations(
+    ordered: pd.DataFrame, id_column: str, time_column: str, profile: DatasetProfile
+) -> dict[str, Any] | None:
+    """Measure entities *joining* the pool after the first cut-off.
+
+    A tape covering two years of a lender's book contains loans written in both,
+    and a revolving deal keeps buying receivables — so a panel whose later
+    cut-offs hold entities the first one never saw is an open pool, and
+    reproducing it as a closed one would generate the wrong thing entirely.
+
+    Whether the arrivals are *newly originated* or *acquired seasoned* is decided
+    by looking at them: a counter that ticks upward measures elapsed time, so if
+    new arrivals enter with it at zero they were written that period.
+    """
+    cohorts = _entities_by_period(ordered, id_column, time_column)
+    if len(cohorts) < 2:
+        return None
+
+    seen = set(cohorts[0])
+    arrivals: list[int] = []
+    first_period: int | None = None
+    joining: set[Any] = set()
+
+    for period, cohort in enumerate(cohorts[1:], start=1):
+        new = cohort - seen
+        arrivals.append(len(new))
+        if new and first_period is None:
+            first_period = period
+        joining |= new
+        seen |= cohort
+
+    if not joining:
+        return None
+
+    opening = max(len(cohorts[0]), 1)
+    mean_new = float(np.mean(arrivals))
+    return {
+        "per_period_mean": round(mean_new, 3),
+        "rate": round(mean_new / opening, 6),
+        "total": len(joining),
+        "start_period": first_period or 1,
+        "periods_observed": len(cohorts),
+        "fresh": _arrivals_look_new(ordered, id_column, joining, profile),
+        "confidence": 0.8 if len(cohorts) >= 6 else 0.5,
+    }
+
+
+# A counter reading at or below this on arrival means no time has elapsed for
+# that entity, i.e. it was written in the period it appeared.
+FRESH_COUNTER_TOLERANCE = 1.0
+
+
+def _arrivals_look_new(
+    ordered: pd.DataFrame, id_column: str, joining: set[Any], profile: DatasetProfile
+) -> bool:
+    """True when entities joining later start their upward counters at zero."""
+    rising = [
+        c["column"]
+        for c in learn_counters(ordered, id_column, profile)
+        if c["step"] > 0 and c["column"] in ordered.columns
+    ]
+    if not rising or not joining:
+        # Nothing measures elapsed time here, so "newly written" and "acquired"
+        # are indistinguishable. Newly written is the commoner case.
+        return True
+
+    arrivals = ordered[ordered[id_column].isin(joining)]
+    first_rows = arrivals.groupby(id_column).head(1)
+    medians = [
+        float(pd.to_numeric(first_rows[column], errors="coerce").median()) for column in rising
+    ]
+    return all(np.isfinite(m) and m <= FRESH_COUNTER_TOLERANCE for m in medians)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +465,14 @@ def learn_amortisation(
     payment_column = detect_by_name(
         ordered, profile, ("scheduled_monthly_payment", "payment", "instalment", "installment")
     )
+    # A remaining-term column is the other way to amortise: without a payment,
+    # balance/term is the equal-principal slice. Worth finding, because a tape
+    # that carries a term but not a payment is common.
+    term_column = detect_by_name(
+        ordered,
+        profile,
+        ("remaining_term_months", "remaining_term", "months_to_maturity", "term_months", "term"),
+    )
 
     # An annuity retires a growing slice of principal each period, so the
     # absolute reduction rises over time; a linear loan retires a constant one.
@@ -400,6 +498,8 @@ def learn_amortisation(
         out["rate"] = rate_column
     if payment_column:
         out["payment"] = payment_column
+    if term_column:
+        out["term"] = term_column
     if state_column:
         # Which states were actually paying down, so the spec can restrict
         # amortisation to them rather than letting defaulted loans amortise.
