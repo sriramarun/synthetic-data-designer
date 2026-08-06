@@ -585,7 +585,12 @@ def test_a_local_instance_claims_nothing_and_limits_nothing(client):
     on saying nothing leaves this machine."""
     meta = client.get("/api/meta").json()
     assert meta["shared"] is False
-    assert meta["limits"] == {"records": None, "periods": None, "upload_mb": None}
+    assert meta["limits"] == {
+        "records": None,
+        "periods": None,
+        "rows": None,
+        "upload_mb": None,
+    }
 
 
 def test_a_shared_instance_says_so(client, monkeypatch):
@@ -599,16 +604,58 @@ def test_a_shared_instance_says_so(client, monkeypatch):
     assert meta["limits"]["records"] == 50_000
 
 
-def test_a_run_over_the_row_ceiling_is_refused(client, monkeypatch):
+def test_a_run_over_the_entity_ceiling_is_refused(client, monkeypatch):
     monkeypatch.setattr(web, "MAX_RECORDS", 1_000)
     spec = client.get(f"/api/packs/{PACK}").json()["spec"]
 
     response = client.post("/api/run", json={"spec": spec, "num_records": 5_000, "periods": 2})
     assert response.status_code == 400
     problems = response.json()["problems"]
-    assert "up to 1,000 rows" in problems[0]
+    # Entities, said as entities. This message called them rows until a run of
+    # 3,000 produced 33,788 of them.
+    assert "up to 1,000 entities" in problems[0]
     # It says where to go for more, rather than only saying no.
     assert "locally" in problems[0]
+
+
+def test_a_run_over_the_row_ceiling_is_refused(client, monkeypatch):
+    """Entities within their cap, periods within theirs, rows over.
+
+    Neither of the other two ceilings sees this run, which is the whole reason
+    the row one exists.
+    """
+    monkeypatch.setattr(web, "MAX_RECORDS", 10_000)
+    monkeypatch.setattr(web, "MAX_PERIODS", 60)
+    monkeypatch.setattr(web, "MAX_ROWS", 50_000)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+
+    response = client.post("/api/run", json={"spec": spec, "num_records": 5_000, "periods": 40})
+    assert response.status_code == 400
+    problems = response.json()["problems"]
+    assert "up to 50,000 rows" in problems[0]
+    assert "200,000" in problems[0], "it shows the arithmetic it refused on"
+
+
+def test_the_row_ceiling_holds_when_originations_hide_the_size(client, monkeypatch):
+    """The request that arithmetic on the payload cannot catch.
+
+    100 entities over 12 periods is 1,200 rows by the front door. Doubling the
+    pool every period is not, and the ceiling inside the ageing loop is the only
+    thing standing between that spec and the machine.
+    """
+    monkeypatch.setattr(web, "MAX_RECORDS", 10_000)
+    monkeypatch.setattr(web, "MAX_ROWS", 5_000)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    spec["originations"] = {"rate": 1.0, "fresh": True}
+
+    started = client.post("/api/run", json={"spec": spec, "num_records": 100, "periods": 12})
+    assert started.status_code == 200, "it passes the pre-check, as expected"
+
+    job = wait_for(client, started.json()["job"])
+    assert job["status"] == "error"
+    assert "5,000-row ceiling" in job["error"]
+    # A limit that stops the run but leaves its output behind is half a limit.
+    assert not (web._workspace() / "runs" / started.json()["job"]).exists()
 
 
 def test_a_run_over_the_period_ceiling_is_refused(client, monkeypatch):

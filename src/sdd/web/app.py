@@ -31,6 +31,7 @@ Four design choices worth stating:
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sdd import __version__, api
+from sdd.age.panel import RowLimitExceeded
 
 STATIC = Path(__file__).parent / "static"
 
@@ -73,6 +75,16 @@ def _limit(name: str) -> int | None:
 MAX_RECORDS = _limit("SDD_MAX_RECORDS")
 MAX_PERIODS = _limit("SDD_MAX_PERIODS")
 MAX_UPLOAD_BYTES = (_limit("SDD_MAX_UPLOAD_MB") or 0) * 1024 * 1024 or None
+
+# The ceiling that actually bounds the machine.
+#
+# MAX_RECORDS counts *entities*, and a panel row is one entity at one cut-off,
+# so the two are separated by the number of periods — and by originations, which
+# add entities as the pool ages and are set in the spec the browser posts. So
+# entities alone bound nothing: measured here, 1,000 entities aged 30 periods
+# with `originations.rate: 1.0` produced 413,938 rows. This is enforced inside
+# the ageing loop, per period, against the row count itself.
+MAX_ROWS = _limit("SDD_MAX_ROWS")
 
 # Whether this instance is shared with people who cannot see the filesystem.
 #
@@ -134,6 +146,7 @@ def meta() -> dict[str, Any]:
         "limits": {
             "records": MAX_RECORDS,
             "periods": MAX_PERIODS,
+            "rows": MAX_ROWS,
             "upload_mb": (MAX_UPLOAD_BYTES // (1024 * 1024)) if MAX_UPLOAD_BYTES else None,
         },
     }
@@ -640,12 +653,22 @@ def _over_the_ceiling(records: int, periods: int) -> list[str]:
     problems = []
     if MAX_RECORDS is not None and records > MAX_RECORDS:
         problems.append(
-            f"This instance generates up to {MAX_RECORDS:,} rows at a time, and this run asks "
-            f"for {records:,}. Run it locally for more — `pip install sdd` and `sdd ui`."
+            f"This instance generates up to {MAX_RECORDS:,} entities at a time, and this run "
+            f"asks for {records:,}. Run it locally for more — `pip install sdd` and `sdd ui`."
         )
     if MAX_PERIODS is not None and periods > MAX_PERIODS:
         problems.append(
             f"This instance ages up to {MAX_PERIODS} periods, and this run asks for {periods}."
+        )
+    # Rows are entities times cut-offs, so the floor below is what this run
+    # cannot avoid producing even if every entity defaults in period one.
+    # Originations only push it higher, which is why MAX_ROWS is also enforced
+    # inside the ageing loop rather than trusted to arithmetic here.
+    if MAX_ROWS is not None and records * periods > MAX_ROWS:
+        problems.append(
+            f"This instance produces up to {MAX_ROWS:,} rows in one run. A row is one entity "
+            f"at one cut-off, so {records:,} entities over {periods} periods is at least "
+            f"{records * periods:,}. Reduce either number."
         )
     return problems
 
@@ -689,6 +712,7 @@ def _execute(
             sample=sample_path,
             validate_output=True,
             progress=progress,
+            max_rows=MAX_ROWS,
         )
         # Hand the browser workspace-relative names, never absolute paths.
         root = _workspace().resolve()
@@ -705,6 +729,13 @@ def _execute(
                 eta_seconds=0,
                 result=result,
             )
+    except RowLimitExceeded as exc:
+        # The periods written before the ceiling was hit are of no use to anyone
+        # and would sit in a shared workspace until the instance restarts. A
+        # limit that stops the run but keeps its output is only half a limit.
+        shutil.rmtree(out_dir, ignore_errors=True)
+        with _jobs_lock:
+            _jobs[job_id].update(status="error", error=str(exc))
     except Exception as exc:
         with _jobs_lock:
             _jobs[job_id].update(status="error", error=f"{type(exc).__name__}: {exc}")

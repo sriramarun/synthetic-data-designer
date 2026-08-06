@@ -352,9 +352,14 @@ function describeInstance(meta) {
     "so read the notice below before uploading anything real.";
 
   const limits = meta.limits || {};
+  // "entities", not "rows". A row is one entity at one cut-off, so the two
+  // differ by the number of periods, and this notice used to quote the entity
+  // cap as though it were a row cap — which read as a promise the run could not
+  // keep, by a factor of forty.
   const bounds = [
-    limits.records && `${fmt.int(limits.records)} rows per run`,
+    limits.records && `${fmt.int(limits.records)} entities per run`,
     limits.periods && `${limits.periods} periods`,
+    limits.rows && `${fmt.int(limits.rows)} rows of output`,
     limits.upload_mb && `${limits.upload_mb} MB uploads`,
   ].filter(Boolean);
 

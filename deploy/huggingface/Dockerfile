@@ -44,14 +44,25 @@ ENV SDD_WORKSPACE=/home/user/workspace
 #      5,000 x 12             58k          471 MB         32 MB
 #     20,000 x 24            447k        1,437 MB        241 MB
 #     50,000 x 24          1,117k        2,518 MB        603 MB
+#     50,000 x 60          2,033k        2,172 MB        769 MB
 #
-# So the 50,000 ceiling peaks around 2.5 GB. Two of those at once — the run pool
-# is two workers — is 5 GB, comfortably inside 16 GB. Raising it is fine here and
-# is not fine on a 512 MB box elsewhere, which is why the number lives in an
-# environment variable rather than in the code.
+# SDD_MAX_ROWS is the one that bounds the machine, and the other two do not
+# imply it. A row is one entity at one cut-off, so 50,000 entities over 60
+# periods is already 2.0M rows — and `originations` in the spec add entities as
+# the pool ages, so the entity count is not even an upper bound on itself.
+# Measured: 1,000 entities aged 30 periods with `originations.rate: 1.0` yields
+# 413,938 rows, 896 MB and 156 MB on disk from a request that looks tiny. The
+# row ceiling is checked inside the ageing loop, per period, against the running
+# count, so no spec can talk its way past it.
+#
+# 2.5M leaves headroom over the 2.0M worst case reachable without originations,
+# and peaks around 2.2 GB. Two at once — the run pool is two workers — is 4.4 GB,
+# comfortably inside 16 GB. Raising it is fine here and is not fine on a 512 MB
+# box elsewhere, which is why these live in the environment, not in the code.
 ENV SDD_SHARED=1 \
     SDD_MAX_RECORDS=50000 \
     SDD_MAX_PERIODS=60 \
+    SDD_MAX_ROWS=2500000 \
     SDD_MAX_UPLOAD_MB=50
 
 EXPOSE 7860

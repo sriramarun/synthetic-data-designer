@@ -49,6 +49,10 @@ class AgeingError(RuntimeError):
     """The panel could not be advanced."""
 
 
+class RowLimitExceeded(AgeingError):
+    """The panel grew past the ceiling it was given and was stopped."""
+
+
 def run_ageing(
     spec: DesignSpec,
     book: pd.DataFrame,
@@ -58,6 +62,7 @@ def run_ageing(
     scenario: Scenario | None = None,
     progress: ProgressFn | None = None,
     write_files: bool = True,
+    max_rows: int | None = None,
 ) -> dict:
     """Age ``book`` across the spec's calendar, writing one file per period.
 
@@ -96,6 +101,7 @@ def run_ageing(
     # handed an identifier an existing entity already holds.
     next_index = opening_size
     originated = 0
+    total_rows = 0
 
     for period, date in enumerate(dates):
         joined = 0
@@ -132,6 +138,24 @@ def run_ageing(
                 originated += joined
 
         out = to_output(spec, current)
+
+        # The ceiling is checked here, per period, rather than projected up
+        # front. A projection has to model originations, terminal-state exits
+        # and the scenario overlay, and a projection that is wrong is worse than
+        # none: it reads as a limit and does not hold. This is the row count
+        # itself, and the period is abandoned before it is written or kept, so
+        # the run stops having spent one period's memory rather than the pool's.
+        total_rows += len(out)
+        if max_rows is not None and total_rows > max_rows:
+            raise RowLimitExceeded(
+                f"this run reached {total_rows:,} rows at period {period + 1} of "
+                f"{len(dates)}, past the {max_rows:,}-row ceiling. Rows are entities "
+                "times cut-offs, and originations add entities as the pool ages, so a "
+                "small entity count can still produce a very large panel. Ask for "
+                "fewer entities or fewer periods, or run it locally, where nothing "
+                "is capped."
+            )
+
         mix = current[lc.state_column].value_counts().to_dict()
         mixes.append(
             {
@@ -171,6 +195,7 @@ def run_ageing(
         "panel": str(panel_path) if panel_path else None,
         "mix": mixes,
         "final_rows": len(current),
+        "total_rows": total_rows,
         "opening_entities": opening_size,
         "originated": originated,
     }
