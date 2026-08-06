@@ -1223,7 +1223,10 @@ async function renderResults(result) {
   const originated = result.originated || 0;
   const total = result.total_entities || result.entities;
 
-  $("#run-stats").replaceChildren(
+  // Filtered, not spread raw: `replaceChildren` turns anything that is not a
+  // Node into a text node, so a conditional tile that evaluates to null renders
+  // the literal word "null" between the tiles.
+  $("#run-stats").replaceChildren(...[
     stat("Rows generated", fmt.int(rows)),
     stat("Columns", fmt.int(state.summary?.columns ?? state.spec.columns.length)),
     stat("Entities", fmt.int(total)),
@@ -1236,7 +1239,7 @@ async function renderResults(result) {
     stat("Validation",
       validation ? (validation.passed ? "Passed" : `${validation.failed} failed`) : "—",
       validation ? (validation.passed ? "good" : "bad") : ""),
-  );
+  ].filter(Boolean));
 
   const target = $("#run-validation");
   target.replaceChildren();
