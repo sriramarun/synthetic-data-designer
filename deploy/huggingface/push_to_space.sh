@@ -56,9 +56,9 @@ cd "$STAGING/space"
 echo "==> Assembling"
 # Only what the image builds from. No tests, no docs, no generated data, and no
 # .git — the Space has its own history.
-rm -rf src packs pyproject.toml Dockerfile README.md
+rm -rf src packs pyproject.toml LICENSE Dockerfile README.md
 cp -R "$ROOT/src" "$ROOT/packs" .
-cp "$ROOT/pyproject.toml" .
+cp "$ROOT/pyproject.toml" "$ROOT/LICENSE" .
 cp "$HERE/Dockerfile" .
 cp "$HERE/README.md" .
 find . -path ./.git -prune -o -name '__pycache__' -type d -print0 | xargs -0 rm -rf

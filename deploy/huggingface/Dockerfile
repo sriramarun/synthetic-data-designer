@@ -23,7 +23,9 @@ ENV HOME=/home/user \
 WORKDIR /home/user/app
 
 # Dependencies before source, so editing a file does not reinstall scipy.
-COPY --chown=user pyproject.toml README.md ./
+# LICENSE is not optional here: pyproject declares `license = { file = ... }`,
+# and hatchling refuses to generate metadata without it.
+COPY --chown=user pyproject.toml README.md LICENSE ./
 COPY --chown=user src ./src
 COPY --chown=user packs ./packs
 RUN pip install --no-cache-dir --user '.[web]'
