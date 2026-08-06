@@ -35,7 +35,7 @@ hf auth whoami >/dev/null || {
 }
 
 echo "==> Creating the Space if it does not exist"
-hf repo create "$SPACE" --repo-type space --space_sdk docker --exist-ok
+hf repo create "$SPACE" --repo-type space --space-sdk docker --exist-ok
 
 echo "==> Cloning https://huggingface.co/spaces/$SPACE"
 git clone "https://huggingface.co/spaces/$SPACE" "$STAGING/space"
