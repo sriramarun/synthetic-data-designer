@@ -35,7 +35,19 @@ hf auth whoami >/dev/null || {
 }
 
 echo "==> Creating the Space if it does not exist"
-hf repo create "$SPACE" --repo-type space --space-sdk docker --exist-ok
+if ! hf repo create "$SPACE" --repo-type space --space-sdk docker --exist-ok; then
+    cat >&2 <<'NOTE'
+
+A Docker Space is not on the free tier. Personal accounts need PRO
+(https://huggingface.co/pro); organisations need Team or Enterprise
+(https://huggingface.co/enterprise). Free covers Static Spaces only, which
+cannot run a Python server.
+
+The Dockerfile beside this script is a plain one and runs anywhere — see
+docs/DEPLOYMENT.md for hosts that do have a free tier.
+NOTE
+    exit 1
+fi
 
 echo "==> Cloning https://huggingface.co/spaces/$SPACE"
 git clone "https://huggingface.co/spaces/$SPACE" "$STAGING/space"

@@ -52,7 +52,7 @@ Source: <https://github.com/sriramarun/synthetic-data-designer>
 | Rows per run | 50,000 |
 | Periods | 60 |
 | Upload size | 50 MB |
-| CTGAN / Hybrid methods | unavailable — they need PyTorch, which is too large and too slow for a free CPU Space |
+| CTGAN / Hybrid methods | unavailable — they need PyTorch, which is too large and too slow for a basic CPU Space |
 
 Run it locally for anything bigger. There are no limits there.
 
