@@ -298,7 +298,9 @@ def correlation_delta(
     if len(usable) < 2:
         return None, excluded, len(usable)
 
-    delta = (reference[usable].corr() - synthetic[usable].corr()).abs().to_numpy()
+    # Copied before the diagonal is written: under pandas' copy-on-write, the
+    # default from pandas 3, the array behind a frame is handed out read-only.
+    delta = (reference[usable].corr() - synthetic[usable].corr()).abs().to_numpy(copy=True)
     np.fill_diagonal(delta, 0.0)
     return float(np.nanmax(delta)), excluded, len(usable)
 
