@@ -1,26 +1,63 @@
-/* Front end for the synthetic data designer.
+/* Front end for the Synthetic Data Designer.
  *
- * One rule shapes the whole file: the browser holds the spec as a plain object
- * and every edit posts it back for validation. There is no client-side copy of
- * the rules — the loader that validates a spec here is the same one the CLI
- * uses, so the UI cannot accept something the engine would reject.
+ * Two rules shape the whole file.
+ *
+ * The browser never decides whether something is valid. It holds the
+ * configuration as a plain object and posts it back on every edit; the loader
+ * that answers is the same one the CLI uses, so this page cannot accept a
+ * configuration the engine would reject.
+ *
+ * The browser never aggregates. Charts, search and sorting all run server-side
+ * against the generated file, so a twelve-million-row panel behaves exactly like
+ * a twelve-thousand-row one.
+ *
+ * No build step, no dependencies: the tool is usually run on a laptop with no
+ * internet, and a CDN link would make the page fail there.
  */
 
-const VIEWS = ["source", "profile", "configure", "results"];
+const VIEWS = ["upload", "review", "configure", "generate", "results", "download"];
 
 const state = {
-  view: "source",
-  spec: null,        // the spec being edited, as a plain object
-  profile: null,     // the analysis, when the spec came from a file
+  view: "upload",
+  source: null,          // token tying the uploaded schema + sample together
+  spec: null,            // the configuration being edited
+  profile: null,         // the analysis, when a sample was uploaded
+  capabilities: null,    // which controls this configuration can honour
+  schema: null,          // the review table
+  edits: new Map(),      // column name -> pending edit
   valid: false,
   problems: [],
+  uploads: { schema: null, sample: null },
   job: null,
+  jobStages: [],
   result: null,
-  reachable: { source: true, profile: false, configure: false, results: false },
+  charts: null,
+  table: { offset: 0, limit: 25, sort: null, descending: false, search: "" },
+  settings: {
+    records: 10000,
+    seed: 42,
+    scenario: "",
+    method: null,
+    noise: 0,
+    correlation: 1,
+    outliers: 0,
+    missing: 0,
+    periods: null,
+    freq: null,
+    default_rate: null,
+    prepayment_rate: null,
+    recovery_rate: null,
+    origination_rate: 0,
+    touched: new Set(),
+  },
+  reachable: { upload: true },
 };
+
+/* --------------------------------------------------------------- utilities */
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
 const el = (tag, attrs = {}, kids = []) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -29,27 +66,44 @@ const el = (tag, attrs = {}, kids = []) => {
     else if (k === "text") node.textContent = v;
     else if (k === "html") node.innerHTML = v;
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v);
+    else node.setAttribute(k, v === true ? "" : v);
   }
   for (const kid of [].concat(kids)) {
-    if (kid) node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    if (kid !== null && kid !== undefined && kid !== false) {
+      node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
   }
   return node;
 };
 
 const fmt = {
-  int: (n) => (n === null || n === undefined ? "—" : Number(n).toLocaleString()),
+  int: (n) => (n === null || n === undefined ? "—" : Math.round(Number(n)).toLocaleString()),
   pct: (n, dp = 1) => (n === null || n === undefined ? "—" : `${(n * 100).toFixed(dp)}%`),
   num: (n, dp = 4) => (n === null || n === undefined ? "—" : Number(n).toFixed(dp)),
+  money: (n) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(2)}bn`;
+    if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1)}m`;
+    if (Math.abs(v) >= 1e3) return `${(v / 1e3).toFixed(0)}k`;
+    return v.toFixed(0);
+  },
   bytes: (n) => {
+    if (n === null || n === undefined) return "—";
     if (n < 1024) return `${n} B`;
     if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
     if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
     return `${(n / 1024 ** 3).toFixed(2)} GB`;
   },
+  seconds: (s) => {
+    if (s === null || s === undefined) return "";
+    if (s < 60) return `${Math.max(1, Math.round(s))}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m ${Math.round(s - m * 60)}s`;
+  },
 };
 
-async function api(path, options = {}) {
+async function call(path, options = {}) {
   const response = await fetch(path, {
     headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
     ...options,
@@ -57,58 +111,112 @@ async function api(path, options = {}) {
   const text = await response.text();
   let payload;
   try { payload = text ? JSON.parse(text) : {}; } catch { payload = { detail: text }; }
-  if (!response.ok) throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const problems = payload.problems ? `: ${payload.problems[0]}` : "";
+    throw new Error((payload.detail || payload.error || `HTTP ${response.status}`) + problems);
+  }
   return payload;
+}
+
+function debounce(fn, wait = 250) {
+  let handle;
+  return (...args) => {
+    clearTimeout(handle);
+    handle = setTimeout(() => fn(...args), wait);
+  };
+}
+
+function status(message, kind = "") {
+  const node = $("#footer-status");
+  node.textContent = message;
+  node.style.color = kind === "bad" ? "var(--bad)" : kind === "good" ? "var(--good)" : "";
+}
+
+function stat(key, value, extra = "") {
+  return el("div", { class: "stat" }, [
+    el("div", { class: "k", text: key }),
+    el("div", { class: `v ${extra}`, text: value }),
+  ]);
+}
+
+function note(text, kind = "", html = false) {
+  return el("div", { class: `note ${kind}`, [html ? "html" : "text"]: text });
 }
 
 /* ------------------------------------------------------------- navigation */
 
+const NEXT_LABEL = {
+  upload: "Analyze data",
+  review: "Generate configuration",
+  configure: "Generate data",
+  generate: "Generating…",
+  results: "Go to downloads",
+  download: "Start over",
+};
+
+function reach(view) { state.reachable[view] = true; }
+
 function show(view) {
   state.view = view;
   VIEWS.forEach((name) => { $(`#view-${name}`).hidden = name !== view; });
-  $$(".step").forEach((button) => {
+
+  const at = VIEWS.indexOf(view);
+  $$(".rail .step").forEach((button) => {
     const target = button.dataset.view;
     button.setAttribute("aria-current", String(target === view));
     button.disabled = !state.reachable[target];
-    button.classList.toggle("complete", state.reachable[target] && VIEWS.indexOf(target) < VIEWS.indexOf(view));
+    // Boolean(): classList.toggle treats an undefined second argument as "no
+    // force given" and flips the class instead of clearing it.
+    button.classList.toggle(
+      "complete",
+      Boolean(state.reachable[target]) && VIEWS.indexOf(target) < at
+    );
   });
-  $("#btn-back").hidden = view === "source";
+
+  $("#btn-back").hidden = at === 0;
   const next = $("#btn-next");
-  if (view === "configure") {
-    next.textContent = "Generate";
-    next.disabled = !state.valid;
-  } else if (view === "results") {
-    next.textContent = "Run again";
-    next.disabled = false;
-  } else {
-    next.textContent = "Next";
-    next.disabled = !state.spec;
-  }
+  next.textContent = NEXT_LABEL[view];
+  next.disabled =
+    (view === "upload" && !state.uploads.schema && !state.uploads.sample) ||
+    (view === "review" && !state.spec) ||
+    (view === "configure" && !state.valid) ||
+    (view === "generate" && state.job !== null && !state.result) ||
+    (view === "results" && !state.result);
+  if (view === "generate" && state.result) next.textContent = "View results";
+
   window.scrollTo({ top: 0, behavior: "instant" });
 }
 
-function reach(view) { state.reachable[view] = true; }
-function status(message, kind = "") {
-  const node = $("#footer-status");
-  node.innerHTML = message;
-  node.style.color = kind === "bad" ? "var(--bad)" : kind === "good" ? "var(--good)" : "";
+function goNext() {
+  switch (state.view) {
+    case "upload":    return analyse();
+    case "review":    return applyEditsThenConfigure();
+    case "configure": return startRun();
+    case "generate":  return state.result ? show("results") : null;
+    case "results":   return show("download");
+    case "download":  return window.location.reload();
+  }
 }
 
-/* ------------------------------------------------------------ spec loading */
+/* ---------------------------------------------------------- spec lifecycle */
 
-async function adoptSpec(spec, { profile = null, origin = "" } = {}) {
+async function adoptSpec(spec, { origin = null } = {}) {
   state.spec = spec;
-  state.profile = profile;
-  $("#spec-name").textContent = origin;
+  if (origin) {
+    $("#spec-name").textContent = origin;
+    $("#spec-name").hidden = false;
+  }
   await validate();
-  reach("configure");
-  if (profile) reach("profile");
   renderConfigure();
+  return state.valid;
 }
 
 async function validate() {
   try {
-    const result = await api("/api/check", { method: "POST", body: JSON.stringify(state.spec) });
+    const result = await call("/api/check", {
+      method: "POST",
+      body: JSON.stringify(state.spec),
+    });
     state.valid = result.valid;
     state.problems = result.problems || [];
     state.summary = result.spec;
@@ -116,288 +224,651 @@ async function validate() {
     state.valid = false;
     state.problems = [error.message];
   }
-  if (state.view === "configure") $("#btn-next").disabled = !state.valid;
-  if (state.valid) {
-    status(`Spec is valid — ${state.summary.columns} columns, ${state.summary.periods} periods.`, "good");
-  } else {
-    status(`Spec has ${state.problems.length} problem(s): ${state.problems[0] || ""}`, "bad");
+
+  const tag = $("#validity");
+  tag.hidden = false;
+  tag.className = `tag ${state.valid ? "ok" : "err"}`;
+  tag.textContent = state.valid
+    ? `valid · ${state.summary.columns} cols · ${state.summary.periods}p`
+    : `${state.problems.length} problem(s)`;
+
+  const host = $("#config-problems");
+  host.replaceChildren();
+  if (!state.valid) {
+    host.append(note(
+      `<strong>This configuration will not run.</strong><ul>${
+        state.problems.slice(0, 8).map((p) => `<li>${escapeHtml(p)}</li>`).join("")
+      }</ul>`, "bad", true));
   }
+  if (state.view === "configure") $("#btn-next").disabled = !state.valid;
   return state.valid;
 }
 
-/* ---------------------------------------------------------------- 1. source */
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+
+/* ------------------------------------------------------------- 1. upload */
+
+function wireDrop(dropId, inputId, kind) {
+  const drop = $(dropId);
+  const input = $(inputId);
+  drop.addEventListener("click", () => input.click());
+  drop.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+  });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0], kind);
+  });
+  input.addEventListener("change", () => {
+    if (input.files[0]) upload(input.files[0], kind);
+  });
+}
+
+async function upload(file, kind) {
+  const target = $(`#${kind}-status`);
+  target.replaceChildren(note(`Uploading ${file.name} (${fmt.bytes(file.size)})…`, ""));
+  target.firstChild.prepend(el("span", { class: "spin" }));
+
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("kind", kind);
+    const stored = await call("/api/upload", { method: "POST", body: form });
+    state.uploads[kind] = stored;
+
+    const detail = kind === "schema"
+      ? `${stored.columns.length} column(s), ${stored.typed} with a declared type.`
+      : `${stored.columns.length} column(s) found.`;
+    target.replaceChildren(note(
+      `<strong>${escapeHtml(stored.original_name)}</strong> — ${detail} ` +
+      `<code class="inline">${fmt.bytes(stored.size_bytes)}</code>`, "good", true));
+
+    $("#schema-req").textContent = state.uploads.schema ? "Loaded" : "Required";
+    status(state.uploads.sample
+      ? "Ready to analyse. The sample supplies the distributions."
+      : "Ready to analyse. Add sample data to measure distributions rather than assume them.");
+    show("upload");
+  } catch (error) {
+    target.replaceChildren(note(error.message, "bad"));
+  }
+}
+
+async function analyse() {
+  const button = $("#btn-next");
+  button.disabled = true;
+  button.textContent = "Analyzing…";
+  $("#upload-error").replaceChildren();
+
+  try {
+    const result = await call("/api/analyse", {
+      method: "POST",
+      body: JSON.stringify({
+        schema_file: state.uploads.schema?.file || null,
+        sample_file: state.uploads.sample?.file || null,
+        name: (state.uploads.sample || state.uploads.schema)?.original_name,
+      }),
+    });
+
+    state.source = result.source;
+    state.profile = result.profile;
+    state.schema = result.schema;
+    state.capabilities = result.capabilities;
+    seedSettings(result.spec, result.capabilities);
+    await adoptSpec(result.spec, {
+      origin: (state.uploads.sample || state.uploads.schema).original_name,
+    });
+
+    reach("review");
+    reach("configure");
+    renderReview();
+    show("review");
+    status(result.profile
+      ? `Analysed ${fmt.int(result.profile.rows)} rows across ${result.profile.columns.length} columns.`
+      : "Schema read. Distributions are yours to choose — there was no sample to measure.");
+  } catch (error) {
+    $("#upload-error").replaceChildren(note(error.message, "bad"));
+    status(error.message, "bad");
+  } finally {
+    button.textContent = NEXT_LABEL[state.view];
+    show(state.view);
+  }
+}
 
 async function loadPacks() {
-  const meta = await api("/api/meta");
+  const meta = await call("/api/meta");
+  state.meta = meta;
   $("#version").textContent = `v${meta.version}`;
+
   const list = $("#packs");
   list.replaceChildren();
   if (!meta.packs.length) {
-    list.append(el("p", { class: "hint", text: "No packs bundled." }));
+    list.append(el("p", { class: "hint", text: "No packs are bundled with this build." }));
     return;
   }
   for (const name of meta.packs) {
-    const info = await api(`/api/packs/${name}`);
-    list.append(
-      el("button", { class: "pack", onclick: () => choosePack(name, info) }, [
-        el("span", {}, [
-          el("div", { class: "name", text: name }),
-          el("div", { class: "m", text: `${info.summary.asset_class} · ${info.summary.columns} columns · ${info.summary.periods} periods · ${info.summary.scenarios.join(", ") || "no scenarios"}` }),
-        ]),
-        el("span", { class: "spacer" }),
-        el("span", { class: "badge", text: "Load" }),
-      ])
-    );
+    const info = await call(`/api/packs/${name}`);
+    const summary = info.summary;
+    list.append(el("button", { class: "pack", onclick: () => choosePack(name, info) }, [
+      el("span", { class: "pack-text" }, [
+        el("div", { class: "name", text: summary.title }),
+        summary.regulatory_template
+          ? el("div", { class: "m", text: summary.regulatory_template })
+          : null,
+        el("div", {
+          class: "m",
+          text: `${summary.asset_class} · ${summary.columns} columns · ` +
+                `${summary.periods} periods · ` +
+                `${summary.scenarios.join(", ") || "no scenarios"}`,
+        }),
+      ]),
+      el("span", { class: "spacer" }),
+      // The identifier `sdd run` takes. Kept visible, but away from the title —
+      // beside it, the two read as one run-together word.
+      el("code", { class: "pack-id", text: name }),
+      el("span", { class: "badge req", text: "Load" }),
+    ]));
   }
 }
 
 async function choosePack(name, info) {
-  state.reachable.profile = false;
-  await adoptSpec(structuredClone(info.spec), { origin: `pack: ${name}` });
-  show("configure");
-}
+  state.source = null;
+  state.profile = null;
+  state.capabilities = info.capabilities;
+  seedSettings(info.spec, info.capabilities);
+  await adoptSpec(structuredClone(info.spec), { origin: info.summary.title });
 
-function wireUpload() {
-  const drop = $("#drop");
-  const input = $("#file");
-  drop.addEventListener("click", () => input.click());
-  drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("over"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (event) => {
-    event.preventDefault();
-    drop.classList.remove("over");
-    if (event.dataTransfer.files[0]) handleUpload(event.dataTransfer.files[0]);
+  state.schema = await call("/api/schema", {
+    method: "POST",
+    body: JSON.stringify({ spec: state.spec }),
   });
-  input.addEventListener("change", () => { if (input.files[0]) handleUpload(input.files[0]); });
+  reach("review");
+  reach("configure");
+  renderReview();
+  show("review");
+  status(`Loaded ${info.summary.title}. Review its schema, or go straight to configuring.`);
 }
 
-async function handleUpload(file) {
-  const target = $("#upload-status");
-  target.replaceChildren(el("div", { class: "note", html: `<span class="spin"></span> Uploading ${file.name} (${fmt.bytes(file.size)})…` }));
-  try {
-    const form = new FormData();
-    form.append("file", file);
-    const uploaded = await api("/api/upload", { method: "POST", body: form });
+/* -------------------------------------------------------------- 2. review */
 
-    target.replaceChildren(el("div", { class: "note", html: `<span class="spin"></span> Analysing ${uploaded.columns.length} columns…` }));
-    const designed = await api("/api/design", {
-      method: "POST",
-      body: JSON.stringify({ file: uploaded.file, name: file.name.replace(/\.[^.]+$/, "").replace(/\W+/g, "_").toLowerCase() }),
-    });
-
-    target.replaceChildren(el("div", { class: "note good", text: `Analysed ${uploaded.original_name}.` }));
-    await adoptSpec(designed.spec, { profile: designed.profile, origin: `from: ${uploaded.original_name}` });
-    renderProfile();
-    show("profile");
-  } catch (error) {
-    target.replaceChildren(el("div", { class: "note bad", text: error.message }));
-  }
+function seedSettings(spec, capabilities) {
+  const s = state.settings;
+  s.periods = spec.entity.calendar.periods;
+  s.freq = spec.entity.calendar.freq;
+  s.method = spec.generation?.method || "distribution";
+  s.noise = spec.generation?.noise ?? 0;
+  s.correlation = spec.generation?.correlation ?? 1;
+  s.outliers = spec.generation?.outliers ?? 0;
+  s.missing = spec.generation?.missing ?? 0;
+  const rates = capabilities?.rates || {};
+  s.default_rate = rates.default_rate;
+  s.prepayment_rate = rates.prepayment_rate;
+  s.recovery_rate = rates.recovery_rate;
+  s.origination_rate = spec.originations?.rate ?? 0;
+  s.touched = new Set();
 }
 
-/* --------------------------------------------------------------- 2. profile */
+function renderReview() {
+  const schema = state.schema;
+  if (!schema) return;
+  const profile = state.profile;
 
-function renderProfile() {
-  const p = state.profile;
-  if (!p) return;
+  $("#review-lede").textContent = profile
+    ? (profile.is_panel
+        ? "The file holds the same entities at several cut-offs, so behaviour over time was measured as well as the shape of each column."
+        : "The file is a single snapshot. Column shapes were measured, but with nothing observed twice there is no way to tell a fixed field from a moving one.")
+    : "Read from the schema alone. Types come from what the schema declares; distributions are yours to choose in the next step.";
 
-  $("#profile-hint").textContent = p.is_panel
-    ? "The file holds the same entities across several cut-offs, so behaviour over time could be measured as well as the shape of each column."
-    : "The file is a single snapshot. Column shapes were measured, but with nothing observed twice there is no way to tell a fixed field from a moving one, or to learn any dynamics.";
-
-  const roles = {};
-  for (const column of p.columns) roles[column.role] = (roles[column.role] || 0) + 1;
-
-  $("#profile-stats").replaceChildren(
-    stat("Rows", fmt.int(p.rows)),
-    stat("Entities", fmt.int(p.entities)),
-    stat("Cut-offs", fmt.int(p.periods)),
-    stat("Columns", fmt.int(p.columns.length)),
-    stat("Need review", fmt.int(p.needs_review.length)),
+  $("#review-stats").replaceChildren(
+    stat("Columns", fmt.int(schema.counts.columns)),
+    stat("Static", fmt.int(schema.counts.static)),
+    stat("Dynamic", fmt.int(schema.counts.dynamic)),
+    stat("Derived", fmt.int(schema.counts.derived)),
+    stat("Date columns", fmt.int(schema.date_columns.length)),
+    stat("Nullable", fmt.int(schema.nullable.length)),
+    stat("Need review", fmt.int(schema.needs_review.length),
+      schema.needs_review.length ? "bad" : "good"),
   );
 
-  const detection = $("#profile-detection");
+  const detection = $("#review-detection");
   detection.replaceChildren();
-  detection.append(el("div", { class: "note", html:
-    `<strong>Entity</strong> <code class="inline">${p.id_column || "not found"}</code> — ${p.detection_notes.id_column || ""}` }));
-  detection.append(el("div", { class: "note", html:
-    `<strong>Cut-off</strong> <code class="inline">${p.time_column || "not found"}</code> — ${p.detection_notes.time_column || ""}` }));
-  detection.append(el("div", { class: "hint", text:
-    `Roles: ${Object.entries(roles).map(([k, v]) => `${v} ${k}`).join(", ")}. A static column never changes for an entity; a dynamic one does; a constant is the same for the whole pool.` }));
-
-  // -- learned dynamics
-  const card = $("#profile-dynamics-card");
-  const dyn = p.dynamics || {};
-  card.hidden = !Object.keys(dyn).length;
-  const body = $("#profile-dynamics");
-  body.replaceChildren();
-
-  if (dyn.lifecycle) {
-    const lc = dyn.lifecycle;
-    body.append(el("div", { class: "note", html:
-      `<strong>Lifecycle</strong> — ${lc.states.length} states in <code class="inline">${lc.state_column}</code>, ` +
-      `${fmt.int(lc.observed_transitions)} transitions counted. ` +
-      `Terminal: ${lc.terminal.map((s) => `<code class="inline">${s}</code>`).join(", ") || "none"}. ` +
-      `Absorbing: ${lc.absorbing.map((s) => `<code class="inline">${s}</code>`).join(", ") || "none"}.` }));
-    if (lc.low_evidence_states?.length) {
-      body.append(el("div", { class: "note warn", text:
-        `Thin evidence for ${lc.low_evidence_states.join(", ")} — those matrix rows rest on very few observations and are worth checking.` }));
-    }
-  }
-  if (dyn.attrition) {
-    body.append(el("div", { class: "note", html:
-      `<strong>Attrition</strong> — ${fmt.pct(dyn.attrition.period_rate, 2)} per period, ${fmt.pct(dyn.attrition.annual_rate, 1)} annualised, over ${dyn.attrition.periods_observed} cut-offs.` }));
-  }
-  if (dyn.amortisation) {
-    body.append(el("div", { class: "note", html:
-      `<strong>Amortisation</strong> — <code class="inline">${dyn.amortisation.kind}</code> on <code class="inline">${dyn.amortisation.balance}</code>. ${dyn.amortisation.reason}.` }));
-  }
-  if (dyn.counters?.length) {
-    body.append(el("div", { class: "note", html:
-      `<strong>Counters</strong> — ${dyn.counters.map((c) => `<code class="inline">${c.column}</code> ${c.step > 0 ? "+" : ""}${c.step}`).join(", ")}.` }));
-  }
-  if (dyn.indices?.length) {
-    body.append(el("div", { class: "note", html:
-      `<strong>Index drift</strong> — ${dyn.indices.map((i) => `${i.applies_to.join(", ")} at ${fmt.pct(i.annual, 2)}/yr`).join("; ")}.` }));
-  }
-  if (p.derived?.length) {
-    body.append(el("div", { class: "note good", html:
-      `<strong>Derived columns</strong> — ${p.derived.map((d) => `<code class="inline">${d.target}</code> is a binning of <code class="inline">${d.source}</code>`).join(", ")}. These are recomputed rather than sampled, so they can never disagree with their source.` }));
+  const notes = profile?.detection_notes || {};
+  detection.append(note(
+    `<strong>Primary key</strong> <code class="inline">${escapeHtml(schema.primary_key)}</code>` +
+    (notes.id_column ? ` — ${escapeHtml(notes.id_column)}` : ""), "", true));
+  detection.append(note(
+    `<strong>Date column</strong> <code class="inline">${escapeHtml(schema.time_column)}</code>` +
+    (notes.time_column ? ` — ${escapeHtml(notes.time_column)}` : ""), "", true));
+  if (schema.needs_review.length) {
+    detection.append(note(
+      `${schema.needs_review.length} column(s) were inferred with low confidence. Filter to ` +
+      `“needs review” below and check those first.`, "warn"));
   }
 
-  renderProfileColumns();
-  $("#profile-filter").oninput = renderProfileColumns;
-  $("#profile-review-only").onchange = renderProfileColumns;
+  renderReviewTable();
+  $("#review-filter").oninput = renderReviewTable;
+  $("#review-review-only").onchange = renderReviewTable;
 }
 
-function renderProfileColumns() {
-  const p = state.profile;
-  const needle = $("#profile-filter").value.trim().toLowerCase();
-  const reviewOnly = $("#profile-review-only").checked;
-  const rows = p.columns.filter((c) =>
-    (!needle || c.name.toLowerCase().includes(needle)) &&
-    (!reviewOnly || c.confidence < 0.5)
-  );
+const DTYPES = ["int", "float", "str", "category", "bool", "date"];
 
-  const table = $("#profile-columns");
+function renderReviewTable() {
+  const needle = $("#review-filter").value.trim().toLowerCase();
+  const reviewOnly = $("#review-review-only").checked;
+  const rows = state.schema.columns.filter((c) =>
+    (!needle || c.name.toLowerCase().includes(needle)) && (!reviewOnly || c.review));
+
+  const table = $("#review-table");
   table.replaceChildren(
     el("thead", {}, el("tr", {}, [
-      el("th", { text: "Column" }), el("th", { text: "Type" }), el("th", { text: "Role" }),
-      el("th", { text: "Fitted as" }), el("th", { class: "num", text: "Distinct" }),
-      el("th", { class: "num", text: "Null" }), el("th", { class: "num", text: "Confidence" }),
+      el("th", { text: "Column" }),
+      el("th", { text: "Type" }),
+      el("th", { text: "Role" }),
+      el("th", { text: "Key" }),
+      el("th", { text: "Required" }),
+      el("th", { class: "num", text: "Distinct" }),
+      el("th", { class: "num", text: "Null in sample" }),
+      el("th", { class: "num", text: "Confidence" }),
+      el("th", { text: "Example" }),
     ])),
-    el("tbody", {}, rows.map((c) => {
-      const badge = c.confidence >= 0.75 ? "good" : c.confidence >= 0.5 ? "warn" : "bad";
-      return el("tr", {}, [
-        el("td", {}, el("code", { class: "inline", text: c.name })),
-        el("td", { text: c.dtype }),
-        el("td", {}, el("span", { class: "badge role", text: c.role })),
-        el("td", { text: c.fit ? c.fit.method : "—" }),
-        el("td", { class: "num", text: fmt.int(c.distinct) }),
-        el("td", { class: "num", text: fmt.pct(c.nulls, 1) }),
-        el("td", { class: "num" }, el("span", { class: `badge ${badge}`, text: fmt.num(c.confidence, 2) })),
-      ]);
-    }))
+    el("tbody", {}, rows.map(reviewRow)),
   );
+  if (!rows.length) {
+    table.append(el("tbody", {}, el("tr", {}, el("td", { colspan: 9 }, "No columns match."))));
+  }
 }
 
-function stat(key, value, small = false) {
-  return el("div", { class: "stat" }, [
-    el("div", { class: "k", text: key }),
-    el("div", { class: `v${small ? " sm" : ""}`, text: value }),
+function reviewRow(column) {
+  const pending = state.edits.get(column.name) || {};
+
+  const name = el("input", {
+    type: "text",
+    value: pending.rename ?? column.name,
+    oninput: (e) => stageEdit(column.name, { rename: e.target.value.trim() }),
+  });
+
+  const type = el("select", {
+    onchange: (e) => stageEdit(column.name, { dtype: e.target.value }),
+  }, DTYPES.map((d) => el("option", {
+    value: d, text: d, selected: d === (pending.dtype ?? column.dtype),
+  })));
+
+  const required = el("input", {
+    type: "checkbox",
+    checked: pending.required ?? column.required,
+    onchange: (e) => stageEdit(column.name, { required: e.target.checked }),
+  });
+
+  const confidence = column.confidence;
+  const badge = confidence === null || confidence === undefined ? ""
+    : confidence >= 0.75 ? "good" : confidence >= 0.5 ? "warn" : "bad";
+
+  return el("tr", {}, [
+    el("td", {}, name),
+    el("td", {}, type),
+    el("td", {}, el("span", { class: "badge role", text: column.role })),
+    el("td", {}, column.primary_key
+      ? el("span", { class: "badge req", text: "key" })
+      : column.date_column ? el("span", { class: "badge", text: "date" }) : ""),
+    el("td", {}, el("label", { class: "check" }, [required, el("span", { text: "required" })])),
+    el("td", { class: "num", text: fmt.int(column.distinct) }),
+    el("td", { class: "num", text: column.observed_nulls === null || column.observed_nulls === undefined
+      ? "—" : fmt.pct(column.observed_nulls, 1) }),
+    el("td", { class: "num" }, confidence === null || confidence === undefined
+      ? "—" : el("span", { class: `badge ${badge}`, text: fmt.num(confidence, 2) })),
+    el("td", {}, el("code", {
+      text: (column.examples || []).slice(0, 2).join(", ").slice(0, 42) || "—",
+    })),
   ]);
 }
 
-/* ------------------------------------------------------------- 3. configure */
+function stageEdit(original, patch) {
+  const current = state.edits.get(original) || { original, name: original };
+  state.edits.set(original, { ...current, ...patch });
+  status(`${state.edits.size} pending edit(s). They apply when you generate the configuration.`);
+}
+
+async function applyEditsThenConfigure() {
+  if (state.edits.size) {
+    try {
+      const result = await call("/api/schema/edit", {
+        method: "POST",
+        body: JSON.stringify({
+          spec: state.spec,
+          source: state.source,
+          edits: Array.from(state.edits.values()),
+        }),
+      });
+      state.spec = result.spec;
+      state.edits.clear();
+      await validate();
+      if (result.applied.length) {
+        status(`Applied: ${result.applied.slice(0, 3).join("; ")}` +
+          (result.applied.length > 3 ? ` (+${result.applied.length - 3} more)` : ""), "good");
+      }
+      state.schema = await call("/api/schema", {
+        method: "POST",
+        body: JSON.stringify({ spec: state.spec, source: state.source }),
+      });
+      renderReview();
+    } catch (error) {
+      status(error.message, "bad");
+      return;
+    }
+  }
+  await pushConfigure({});
+  reach("configure");
+  show("configure");
+}
+
+/* ----------------------------------------------------------- 3. configure */
+
+const METHODS = [
+  ["statistical", "Statistical",
+   "Every numeric column becomes a normal with the same mean and spread. Fast and obvious; wrong in the tails on purpose."],
+  ["distribution", "Distribution based",
+   "The best-fitting named distribution per column — lognormal, gamma, beta — chosen by the profiler. The most faithful closed-form option."],
+  ["rule_based", "Rule based",
+   "No fitted shape at all: numbers uniform inside their bounds, categories equally likely inside their domain. The schema-only path."],
+  ["sampling", "Sampling",
+   "Resamples the observed values, spikes and all. The only method that reproduces a zero-inflated column exactly.", "needs sample data"],
+  ["ctgan", "CTGAN",
+   "A deep tabular model trained on your tape, learning how columns move together rather than one at a time.", "needs sample data and the deep extra"],
+  ["hybrid", "Hybrid",
+   "Fitted distributions across the schema, then a deep polish over the columns it can improve.", "needs sample data and the deep extra"],
+];
 
 function renderConfigure() {
-  const spec = state.spec;
-  if (!spec) return;
-
-  $("#cfg-periods").value = spec.entity.calendar.periods;
-  $("#cfg-periods-sub").textContent = `${spec.entity.calendar.freq.replace("_", " ")} from ${spec.entity.calendar.start}.`;
-
-  const scenarios = Object.keys(spec.scenarios || {});
-  const select = $("#cfg-scenario");
-  select.replaceChildren(el("option", { value: "", text: scenarios.length ? "None (base calibration)" : "No scenarios in this spec" }));
-  for (const name of scenarios) {
-    select.append(el("option", { value: name, text: name }));
-  }
-  select.disabled = !scenarios.length;
-  select.onchange = () => {
-    const chosen = spec.scenarios?.[select.value];
-    $("#cfg-scenario-sub").textContent = chosen?.description
-      || "A stress overlay that shifts defaults, prepayment and collateral together.";
-  };
-
-  renderDynamics();
-  renderLifecycle();
+  if (!state.spec) return;
+  renderScale();
+  renderMethods();
+  renderRandomness();
+  renderAging();
   renderColumns();
   refreshYaml();
 }
 
-function renderDynamics() {
+function renderScale() {
   const spec = state.spec;
-  const host = $("#cfg-dynamics");
+  const s = state.settings;
+  $("#cfg-records").value = s.records;
+  $("#cfg-seed").value = s.seed;
+
+  const scenarios = Object.keys(spec.scenarios || {});
+  const select = $("#cfg-scenario");
+  select.replaceChildren(el("option", {
+    value: "",
+    text: scenarios.length ? "None (base calibration)" : "No scenarios in this configuration",
+  }));
+  for (const name of scenarios) {
+    select.append(el("option", { value: name, text: name, selected: name === s.scenario }));
+  }
+  select.disabled = !scenarios.length;
+  select.onchange = () => {
+    s.scenario = select.value;
+    const chosen = spec.scenarios?.[select.value];
+    $("#cfg-scenario-sub").textContent = chosen?.description
+      || "A stress overlay shifting defaults, prepayment and collateral together.";
+  };
+
+  updateSizeNote();
+}
+
+function updateSizeNote() {
+  const s = state.settings;
+  const periods = s.periods || 1;
+  const columns = state.summary?.columns || state.spec.columns.length;
+  const cells = s.records * periods * columns;
+  $("#cfg-size-note").innerHTML =
+    `About <strong>${fmt.int(s.records * periods)}</strong> rows ` +
+    `(${fmt.int(s.records)} entities × ${periods} periods) across ${columns} columns — ` +
+    `roughly ${fmt.int(cells)} values. Rows leave the pool as they redeem or write off, ` +
+    `so the real count is a little lower.`;
+}
+
+function renderMethods() {
+  const host = $("#cfg-methods");
+  const hasSample = Boolean(state.source && state.uploads.sample);
+  const hasDeep = Boolean(state.meta?.deep_models);
   host.replaceChildren();
-  const dyn = spec.dynamics || {};
 
-  if (dyn.amortisation) {
-    const am = dyn.amortisation;
-    const kinds = ["annuity", "linear", "bullet", "interest_only", "revolving", "depreciation", "none"];
-    const grid = el("div", { class: "grid three" });
-    grid.append(labelled("Amortisation", "How the balance moves each period.",
-      el("select", { onchange: (e) => { am.kind = e.target.value; validate(); refreshYaml(); } },
-        kinds.map((k) => el("option", { value: k, text: k, selected: k === am.kind })))));
-    grid.append(labelled("Balance column", "The column being paid down.",
-      el("input", { type: "text", value: am.balance, disabled: true })));
-    if (am.only_when_state) {
-      grid.append(labelled("Only when", "States in which a payment is assumed. Everything else freezes the balance.",
-        el("input", { type: "text", value: [].concat(am.only_when_state).join(", "), disabled: true })));
-    }
-    if (am.rate_per_period !== undefined && am.rate_per_period !== null) {
-      grid.append(labelled("Rate per period", "Proportional change each period.",
-        slider(am.rate_per_period, 0, 0.25, 0.005, (v) => { am.rate_per_period = v; validate(); refreshYaml(); }, (v) => fmt.pct(v, 1))));
-    }
-    host.append(grid);
-  } else {
-    host.append(el("p", { class: "hint", text: "This spec has no amortisation rule, so balances do not move on their own." }));
-  }
+  for (const [key, label, description, requirement] of METHODS) {
+    const needsSample = key === "sampling" ? !state.profile : ["ctgan", "hybrid"].includes(key) && !hasSample;
+    const needsDeep = ["ctgan", "hybrid"].includes(key) && !hasDeep;
+    const blocked = needsSample || needsDeep;
 
-  for (const index of dyn.indices || []) {
-    if (index.kind !== "constant_drift") continue;
-    host.append(el("div", { style: "margin-top:16px" },
-      labelled(`Index: ${index.name}`,
-        `Applied to ${index.applies_to.join(", ")}. Negative means falling collateral.`,
-        slider(index.annual, -0.30, 0.20, 0.005, (v) => { index.annual = v; validate(); refreshYaml(); }, (v) => `${(v * 100).toFixed(1)}%/yr`))));
-  }
-
-  if ((dyn.counters || []).length) {
-    host.append(el("p", { class: "hint", style: "margin-top:16px", html:
-      `Counters ticking each period: ${dyn.counters.map((c) => `<code class="inline">${c.column} ${c.step > 0 ? "+" : ""}${c.step ?? c.expr}</code>`).join(" ")}` }));
+    host.append(el("button", {
+      class: "method",
+      "aria-pressed": String(state.settings.method === key),
+      disabled: blocked,
+      title: blocked ? requirement : "",
+      onclick: () => chooseMethod(key),
+    }, [
+      el("div", { class: "m-name" }, [
+        label,
+        state.settings.method === key ? el("span", { class: "badge good", text: "in use" }) : null,
+      ]),
+      el("div", { class: "m-desc", text: description }),
+      blocked ? el("div", { class: "m-need", text:
+        needsDeep && needsSample ? `Unavailable — ${requirement}.`
+        : needsDeep ? "Unavailable — install the deep extra: pip install 'sdd[deep]'."
+        : "Unavailable — upload sample data in step 1." }) : null,
+    ]));
   }
 }
 
-function renderLifecycle() {
-  const spec = state.spec;
-  const lc = spec.lifecycle;
-  $("#card-lifecycle").hidden = !lc;
-  if (!lc) return;
+async function chooseMethod(method) {
+  state.settings.method = method;
+  state.settings.touched.add("method");
+  renderMethods();
+  await pushConfigure({ method, from_base: Boolean(state.source) });
+}
 
-  const states = lc.transition_states || lc.states.filter((s) => !(lc.terminal || []).includes(s));
-  const host = $("#cfg-matrix");
+function renderRandomness() {
+  const host = $("#cfg-randomness");
+  const s = state.settings;
+  const canCorrelate = Boolean(state.capabilities?.correlation);
+  const optional = state.capabilities?.optional_columns || [];
+  host.replaceChildren();
+
+  host.append(sliderField(
+    "Noise", s.noise, 0, 0.5, 0.01,
+    "Gaussian jitter added to every numeric column, as a share of that column's own standard deviation. 5% is a realistic amount of measurement error.",
+    (v) => commitRandomness("noise", v), (v) => fmt.pct(v, 0)));
+
+  host.append(sliderField(
+    "Correlation", s.correlation, 0, 1, 0.05,
+    canCorrelate
+      ? "How much of the sample's measured correlation to reimpose. Columns are reordered to match, which changes how they move together without changing any column's own distribution."
+      : "No sample was analysed, so no relationship between columns was ever measured. This control has nothing to reimpose.",
+    (v) => commitRandomness("correlation", v), (v) => fmt.pct(v, 0), !canCorrelate));
+
+  host.append(sliderField(
+    "Outliers", s.outliers, 0, 0.1, 0.005,
+    "Share of rows pushed four standard deviations into the tail — the data-quality artefacts a downstream system should survive. Declared bounds are still respected.",
+    (v) => commitRandomness("outliers", v), (v) => fmt.pct(v, 1)));
+
+  host.append(sliderField(
+    "Missing values", s.missing, 0, 0.5, 0.01,
+    optional.length
+      ? `Share of values blanked across the ${optional.length} optional column(s). Identifiers, dates and anything the engine reads are never blanked.`
+      : "Every column is currently marked required, so there is nothing to blank. Mark columns optional in the review step.",
+    (v) => commitRandomness("missing", v), (v) => fmt.pct(v, 0), !optional.length));
+}
+
+function sliderField(label, value, min, max, step, sub, onCommit, format, disabled = false) {
+  const output = el("output", { text: format(value) });
+  const input = el("input", {
+    type: "range", min, max, step, value, disabled,
+    oninput: (e) => { output.textContent = format(parseFloat(e.target.value)); },
+    onchange: (e) => onCommit(parseFloat(e.target.value)),
+  });
+  return el("label", { class: "field" }, [
+    el("span", { class: "lbl", text: label }),
+    el("div", { class: "slider" }, [input, output]),
+    el("span", { class: "sub", text: sub }),
+  ]);
+}
+
+const commitRandomness = (key, value) => {
+  state.settings[key] = value;
+  state.settings.touched.add(key);
+  pushConfigure({});
+};
+
+function renderAging() {
+  const spec = state.spec;
+  const caps = state.capabilities || {};
+  const s = state.settings;
+
+  const basics = $("#cfg-aging-basics");
+  basics.replaceChildren(
+    el("label", { class: "field" }, [
+      el("span", { class: "lbl", text: "Number of periods" }),
+      el("input", {
+        type: "number", min: 1, step: 1, value: s.periods,
+        onchange: (e) => {
+          s.periods = Math.max(1, parseInt(e.target.value, 10) || 1);
+          s.touched.add("periods");
+          updateSizeNote();
+          pushConfigure({});
+        },
+      }),
+      el("span", { class: "sub", text: `Cut-offs to emit, starting ${spec.entity.calendar.start}.` }),
+    ]),
+    el("label", { class: "field" }, [
+      el("span", { class: "lbl", text: "Frequency" }),
+      el("select", {
+        onchange: (e) => { s.freq = e.target.value; s.touched.add("freq"); pushConfigure({}); },
+      }, [
+        el("option", { value: "month_end", text: "Monthly", selected: s.freq === "month_end" }),
+        el("option", { value: "quarter_end", text: "Quarterly", selected: s.freq === "quarter_end" }),
+        el("option", { value: "year_end", text: "Annually", selected: s.freq === "year_end" }),
+      ]),
+      el("span", { class: "sub", text: "How far apart the cut-offs are. Rates below are annual either way." }),
+    ]),
+    el("div", { class: "field" }, [
+      el("span", { class: "lbl", text: "Lifecycle" }),
+      el("div", {}, caps.ageing
+        ? el("span", { class: "badge good", text: `${(caps.states || []).length} states` })
+        : el("span", { class: "badge warn", text: "none — single snapshot" })),
+      el("span", { class: "sub", text: caps.ageing
+        ? (caps.states || []).join(" → ")
+        : "Without states there is nothing to age: every period would be identical." }),
+    ]),
+  );
+
+  const host = $("#cfg-aging-rates");
+  host.replaceChildren();
+  host.append(rateField(
+    "Default rate", s.default_rate, caps.default_rate,
+    "Share of performing loans that default within a year. Setting it rescales the transition matrix and renormalises every row, so the matrix stays a matrix.",
+    "this configuration declares no state a loan cannot recover from, so nothing counts as a default",
+    (v) => commitRate("default_rate", v)));
+  host.append(rateField(
+    "Prepayment rate", s.prepayment_rate, caps.prepayment_rate,
+    "Annual chance a healthy loan redeems early. Applied as the hazard rate the engine already uses.",
+    "no hazard in this configuration takes a healthy loan out of the pool",
+    (v) => commitRate("prepayment_rate", v)));
+  host.append(rateField(
+    "Recovery rate", s.recovery_rate, caps.recovery_rate,
+    "Share of the balance recovered when a loan writes off, booked in the period it happens. A recovery column is added if there is not one.",
+    "this configuration has no write-off state, so there is no point at which a recovery would be booked",
+    (v) => commitRate("recovery_rate", v)));
+
+  renderOriginations();
+  renderMatrix();
+}
+
+function renderOriginations() {
+  const host = $("#cfg-originations");
+  const caps = state.capabilities || {};
+  const s = state.settings;
+  host.replaceChildren();
+
+  if (!caps.originations) {
+    host.append(note(
+      "New loans need a lifecycle: without states there is no ageing for them to join, " +
+      "and every period would be identical.", "warn"));
+    return;
+  }
+
+  host.append(sliderField(
+    "New loans per period", s.origination_rate, 0, 0.1, 0.0025,
+    "Share of the opening pool written at every cut-off after the first. At 0 the pool is " +
+    "closed — it only shrinks, and every loan exists at the first cut-off. Above 0 it stays " +
+    "open, so the panel holds loans written during the window as well as before it.",
+    (v) => { s.origination_rate = v; s.touched.add("origination_rate");
+             pushConfigure({ origination_rate: v }); },
+    (v) => (v ? `${(v * 100).toFixed(2)}%` : "closed pool")));
+
+  // The arithmetic people actually want: how big does the pool get?
+  const periods = s.periods || 1;
+  const perPeriod = Math.round(state.settings.records * s.origination_rate);
+  host.append(el("div", { class: "field" }, [
+    el("span", { class: "lbl", text: "Over the whole run" }),
+    el("div", { class: "note", html: s.origination_rate
+      ? `About <strong>${fmt.int(perPeriod)}</strong> new loans each period — ` +
+        `<strong>${fmt.int(perPeriod * (periods - 1))}</strong> across ${periods - 1} cut-off(s), ` +
+        `on top of the ${fmt.int(state.settings.records)} the pool opens with. Attrition still ` +
+        `removes loans as they redeem and write off, so the pool grows by less than that.`
+      : `The pool opens with ${fmt.int(state.settings.records)} loans and only shrinks from there.` }),
+  ]));
+}
+
+function rateField(label, value, available, sub, why, onCommit) {
+  if (!available) {
+    return el("div", { class: "field" }, [
+      el("span", { class: "lbl", text: label }),
+      el("input", { type: "text", value: "not applicable", disabled: true }),
+      el("span", { class: "sub", text: `Unavailable — ${why}.` }),
+    ]);
+  }
+  const current = value === null || value === undefined ? 0 : value;
+  const output = el("output", { text: fmt.pct(current, 2) });
+  const input = el("input", {
+    type: "range", min: 0, max: 0.5, step: 0.0025, value: current,
+    oninput: (e) => { output.textContent = fmt.pct(parseFloat(e.target.value), 2); },
+    onchange: (e) => onCommit(parseFloat(e.target.value)),
+  });
+  return el("label", { class: "field" }, [
+    el("span", { class: "lbl", text: `${label} (annual)` }),
+    el("div", { class: "slider" }, [input, output]),
+    el("span", { class: "sub", text: sub }),
+  ]);
+}
+
+const commitRate = (key, value) => {
+  state.settings[key] = value;
+  state.settings.touched.add(key);
+  pushConfigure({});
+};
+
+function renderMatrix() {
+  const lc = state.spec.lifecycle;
+  $("#card-lifecycle").hidden = !lc || !lc.transitions;
+  if (!lc || !lc.transitions) return;
+
+  const states = lc.transition_states
+    || lc.states.filter((s) => !(lc.terminal || []).includes(s));
 
   const head = el("tr", {}, [el("th", { class: "rowhdr", text: "from ╲ to" })]);
   for (const name of states) head.append(el("th", { class: "num", text: name }));
   head.append(el("th", { class: "num", text: "Σ" }));
 
   const body = el("tbody");
-  (lc.transitions || []).forEach((row, i) => {
+  lc.transitions.forEach((row, i) => {
     const tr = el("tr", {}, [el("th", { class: "rowhdr", text: states[i] })]);
     row.forEach((value, j) => {
       const input = el("input", {
-        type: "number", step: "0.0001", min: "0", max: "1", value: value,
-        oninput: (event) => {
-          const parsed = parseFloat(event.target.value);
+        type: "number", step: "0.0001", min: "0", max: "1", value: Number(value).toFixed(4),
+        oninput: (e) => {
+          const parsed = parseFloat(e.target.value);
           lc.transitions[i][j] = Number.isFinite(parsed) ? parsed : 0;
           updateRowSum(i);
         },
@@ -405,105 +876,81 @@ function renderLifecycle() {
       });
       tr.append(el("td", { class: i === j ? "diag" : "" }, input));
     });
-    tr.append(el("td", { class: "sum", "data-sum": i }));
+    tr.append(el("td", { class: "sum", "data-sum": String(i) }));
     body.append(tr);
   });
 
-  const table = el("table", {}, [el("thead", {}, head), body]);
-  host.replaceChildren(table);
-  (lc.transitions || []).forEach((_, i) => updateRowSum(i));
-
-  // -- hazards
-  const hazards = $("#cfg-hazards");
-  hazards.replaceChildren();
-  if (!(lc.hazards || []).length) return;
-  hazards.append(el("h2", { style: "font-size:13px;margin:0 0 3px", text: "Hazards" }));
-  hazards.append(el("p", { class: "hint", text: "Events decided outside the matrix. A Bernoulli hazard fires on a flat per-period chance; a dwell-time hazard fires after a fixed number of periods in one state." }));
-  const grid = el("div", { class: "grid two" });
-  for (const hz of lc.hazards) {
-    if (hz.kind === "bernoulli" && hz.annual_rate !== undefined) {
-      grid.append(labelled(`${hz.name} → ${hz.to_state}`, "Annualised probability.",
-        slider(hz.annual_rate, 0, 0.5, 0.005, (v) => { hz.annual_rate = v; validate(); refreshYaml(); }, (v) => `${(v * 100).toFixed(1)}%/yr`)));
-    } else if (hz.kind === "dwell_time") {
-      grid.append(labelled(`${hz.name}: ${hz.from_state} → ${hz.to_state}`, "Periods in the state before it fires.",
-        el("input", { type: "number", min: "1", step: "1", value: hz.periods,
-          onchange: (e) => { hz.periods = Math.max(1, parseInt(e.target.value, 10) || 1); validate(); refreshYaml(); } })));
-    }
-  }
-  hazards.append(grid);
+  $("#cfg-matrix").replaceChildren(el("table", {}, [el("thead", {}, head), body]));
+  lc.transitions.forEach((_, i) => updateRowSum(i));
 }
 
 function updateRowSum(i) {
-  const lc = state.spec.lifecycle;
-  const total = (lc.transitions[i] || []).reduce((a, b) => a + (Number(b) || 0), 0);
+  const total = (state.spec.lifecycle.transitions[i] || [])
+    .reduce((a, b) => a + (Number(b) || 0), 0);
   const cell = $(`#cfg-matrix td.sum[data-sum="${i}"]`);
   if (!cell) return;
-  const ok = Math.abs(total - 1) < 1e-6;
   cell.textContent = total.toFixed(4);
-  cell.className = `sum ${ok ? "ok" : "off"}`;
+  cell.className = `sum ${Math.abs(total - 1) < 1e-6 ? "ok" : "off"}`;
 }
 
 function renderColumns() {
-  const spec = state.spec;
   const host = $("#cfg-columns");
   const needle = $("#cfg-filter").value.trim().toLowerCase();
   host.replaceChildren();
 
-  const editable = spec.columns.filter((c) => c.generator && (!needle || c.name.toLowerCase().includes(needle)));
+  const editable = state.spec.columns.filter((c) =>
+    c.generator && (!needle || c.name.toLowerCase().includes(needle)));
   if (!editable.length) {
     host.append(el("p", { class: "hint", text: "No sampled columns match." }));
     return;
   }
 
-  for (const column of editable.slice(0, 120)) {
+  for (const column of editable.slice(0, 100)) {
     const gen = column.generator;
-    const row = el("div", { class: "col-row" });
-    const head = el("div", { class: "col-head" }, [
-      el("code", { class: "cname", text: column.name }),
-      el("span", { class: "badge role", text: column.role }),
-      el("span", { class: "badge", text: gen.kind }),
-      el("span", { class: "spacer" }),
-      column.confidence !== undefined && column.confidence !== null
-        ? el("span", { class: `badge ${column.confidence >= 0.75 ? "good" : column.confidence >= 0.5 ? "warn" : "bad"}`, text: `conf ${fmt.num(column.confidence, 2)}` })
-        : null,
+    const row = el("div", { class: "col-row" }, [
+      el("div", { class: "col-head" }, [
+        el("code", { class: "cname", text: column.name }),
+        el("span", { class: "badge role", text: column.role }),
+        el("span", { class: "badge", text: gen.kind }),
+        column.required === false ? el("span", { class: "badge warn", text: "optional" }) : null,
+        el("span", { class: "spacer" }),
+        column.confidence === null || column.confidence === undefined ? null
+          : el("span", {
+              class: `badge ${column.confidence >= 0.75 ? "good" : column.confidence >= 0.5 ? "warn" : "bad"}`,
+              text: `conf ${fmt.num(column.confidence, 2)}`,
+            }),
+      ]),
     ]);
-    row.append(head);
 
     const params = el("div", { class: "col-params" });
     if (gen.kind === "categorical" && gen.weights) {
-      gen.values.forEach((value, i) => {
-        params.append(labelled(String(value), null,
-          el("input", {
-            type: "number", step: "0.001", min: "0", value: gen.weights[i],
-            onchange: (event) => {
-              const parsed = parseFloat(event.target.value);
-              gen.weights[i] = Number.isFinite(parsed) ? parsed : 0;
-              validate(); refreshYaml();
-            },
-          })));
+      gen.values.slice(0, 24).forEach((value, i) => {
+        params.append(labelled(String(value), numberInput(gen.weights, i, 0.001)));
       });
     } else if (gen.kind === "scipy") {
-      for (const [key, value] of Object.entries(gen.params || {})) {
-        params.append(labelled(key, null,
-          el("input", { type: "number", step: "any", value: value,
-            onchange: (event) => { gen.params[key] = parseFloat(event.target.value); validate(); refreshYaml(); } })));
+      for (const key of Object.keys(gen.params || {})) {
+        params.append(labelled(key, numberInput(gen.params, key)));
       }
     } else if (gen.kind === "gaussian") {
-      params.append(labelled("mean", null, numberInput(gen, "mean")));
-      params.append(labelled("stddev", null, numberInput(gen, "stddev")));
+      params.append(labelled("mean", numberInput(gen, "mean")));
+      params.append(labelled("stddev", numberInput(gen, "stddev")));
     } else if (gen.kind === "uniform") {
-      params.append(labelled("low", null, numberInput(gen, "low")));
-      params.append(labelled("high", null, numberInput(gen, "high")));
+      params.append(labelled("low", numberInput(gen, "low")));
+      params.append(labelled("high", numberInput(gen, "high")));
     } else if (gen.kind === "bernoulli") {
-      params.append(labelled("p", "Probability of the true value.",
-        slider(gen.p, 0, 1, 0.005, (v) => { gen.p = v; validate(); refreshYaml(); }, (v) => v.toFixed(3))));
+      params.append(labelled("p", numberInput(gen, "p", 0.005)));
     } else if (gen.kind === "constant") {
-      params.append(labelled("value", null,
-        el("input", { type: "text", value: gen.value ?? "",
-          onchange: (event) => { gen.value = event.target.value; validate(); refreshYaml(); } })));
+      params.append(labelled("value", el("input", {
+        type: "text", value: gen.value ?? "",
+        onchange: (e) => { gen.value = e.target.value; validate(); refreshYaml(); },
+      })));
+    } else if (gen.kind === "empirical") {
+      params.append(el("p", { class: "hint", style: "margin:0", text:
+        `${gen.values.length} observed value(s) resampled with their measured weights. ` +
+        `Edit these in the Advanced tab.` }));
     } else {
       params.append(el("p", { class: "hint", style: "margin:0", text:
-        `${gen.kind} — edit this one in the raw YAML below.` }));
+        `${gen.kind} — edit this one in the Advanced tab.` }));
     }
     row.append(params);
 
@@ -511,303 +958,681 @@ function renderColumns() {
     host.append(row);
   }
 
-  if (editable.length > 120) {
-    host.append(el("p", { class: "hint", text: `Showing 120 of ${editable.length} — filter to narrow it down.` }));
+  if (editable.length > 100) {
+    host.append(el("p", { class: "hint", text:
+      `Showing 100 of ${editable.length} columns — filter to narrow it down.` }));
   }
 }
 
-function numberInput(target, key) {
-  return el("input", {
-    type: "number", step: "any", value: target[key],
-    onchange: (event) => { target[key] = parseFloat(event.target.value); validate(); refreshYaml(); },
-  });
-}
-
-function labelled(title, sub, control) {
+function labelled(title, control) {
   return el("label", { class: "field" }, [
     el("span", { class: "lbl", text: title }),
     control,
-    sub ? el("span", { class: "sub", text: sub }) : null,
   ]);
 }
 
-function slider(value, min, max, step, onCommit, format) {
-  const output = el("output", { text: format(value) });
-  const input = el("input", {
-    type: "range", min, max, step, value,
-    oninput: (event) => { output.textContent = format(parseFloat(event.target.value)); },
-    onchange: (event) => { onCommit(parseFloat(event.target.value)); },
+function numberInput(target, key, step = "any") {
+  return el("input", {
+    type: "number", step, value: target[key],
+    onchange: (e) => {
+      const parsed = parseFloat(e.target.value);
+      target[key] = Number.isFinite(parsed) ? parsed : 0;
+      validate();
+      refreshYaml();
+    },
   });
-  return el("div", { class: "slider" }, [input, output]);
 }
 
-/* --------------------------------------------------------------- raw YAML */
+/* the configure round trip -------------------------------------------------- */
+
+async function pushConfigure(extra) {
+  const s = state.settings;
+  const touched = s.touched;
+  const body = {
+    source: state.source,
+    spec: state.spec,
+    noise: s.noise,
+    correlation: s.correlation,
+    outliers: s.outliers,
+    missing: s.missing,
+    periods: s.periods,
+    freq: s.freq,
+    // Only sent once deliberately set: re-sending a rate would overwrite a
+    // matrix the user had just edited by hand.
+    default_rate: touched.has("default_rate") ? s.default_rate : null,
+    prepayment_rate: touched.has("prepayment_rate") ? s.prepayment_rate : null,
+    recovery_rate: touched.has("recovery_rate") ? s.recovery_rate : null,
+    origination_rate: touched.has("origination_rate") ? s.origination_rate : null,
+    ...extra,
+  };
+
+  try {
+    const result = await call("/api/configure", { method: "POST", body: JSON.stringify(body) });
+    state.spec = result.spec;
+    state.valid = result.valid;
+    state.problems = result.problems;
+    if (result.capabilities) {
+      state.capabilities = { ...result.capabilities, optional_columns: result.optional_columns };
+    }
+    if (result.rates) {
+      for (const key of ["default_rate", "prepayment_rate", "recovery_rate"]) {
+        if (!touched.has(key)) s[key] = result.rates[key];
+      }
+    }
+    // What the method did describes the spec as it now stands, so it survives
+    // later edits; every other note describes the call that produced it.
+    const notes = result.notes || [];
+    if (extra.method) state.methodNotes = notes.filter((n) => !/rate set|not applied/i.test(n));
+    renderNotes(extra.method ? notes : [...(state.methodNotes || []), ...notes]);
+    await validate();
+    renderConfigure();
+  } catch (error) {
+    status(error.message, "bad");
+  }
+}
+
+// A note belongs beside the control it is about, so it is routed by what it
+// mentions. Anything unrecognised goes to the method tab, which is where a note
+// about the configuration as a whole makes most sense.
+const NOTE_TABS = [
+  [/correlation|missing values|blank|noise|outlier/i, "#randomness-notes"],
+  [/new loans|origination|dated to the period|rate|matrix|recovery|prepay/i, "#aging-notes"],
+];
+
+function renderNotes(notes) {
+  const hosts = ["#method-notes", "#aging-notes", "#randomness-notes"];
+  hosts.forEach((id) => $(id).replaceChildren());
+  for (const text of notes) {
+    const match = NOTE_TABS.find(([pattern]) => pattern.test(text));
+    $(match ? match[1] : "#method-notes").append(
+      note(text, /not applied|nowhere|no sample|nothing to/i.test(text) ? "warn" : "")
+    );
+  }
+}
+
+/* raw YAML ------------------------------------------------------------------ */
 
 async function refreshYaml() {
   try {
-    const { yaml } = await api("/api/spec/yaml", { method: "POST", body: JSON.stringify(state.spec) });
+    const { yaml } = await call("/api/spec/yaml", {
+      method: "POST", body: JSON.stringify(state.spec),
+    });
     $("#cfg-yaml").value = yaml;
-  } catch { /* the form remains the source of truth */ }
+  } catch { /* the forms remain the source of truth */ }
 }
 
 function wireYaml() {
   $("#btn-yaml-apply").onclick = async () => {
     const target = $("#yaml-status");
     try {
-      const result = await api("/api/spec/parse", { method: "POST", body: JSON.stringify({ yaml: $("#cfg-yaml").value }) });
+      const result = await call("/api/spec/parse", {
+        method: "POST", body: JSON.stringify({ yaml: $("#cfg-yaml").value }),
+      });
       if (!result.valid) {
-        target.replaceChildren(el("div", { class: "note bad", html:
-          `<strong>Not applied.</strong><ul>${result.problems.map((p) => `<li>${p}</li>`).join("")}</ul>` }));
+        target.replaceChildren(note(
+          `<strong>Not applied.</strong><ul>${
+            result.problems.map((p) => `<li>${escapeHtml(p)}</li>`).join("")
+          }</ul>`, "bad", true));
         return;
       }
       state.spec = result.parsed;
-      target.replaceChildren(el("div", { class: "note good", text: "Applied. The forms above now reflect this document." }));
+      seedSettings(state.spec, state.capabilities);
+      target.replaceChildren(note("Applied. The forms now reflect this document.", "good"));
       await validate();
       renderConfigure();
     } catch (error) {
-      target.replaceChildren(el("div", { class: "note bad", text: error.message }));
+      target.replaceChildren(note(error.message, "bad"));
     }
   };
-  $("#btn-yaml-revert").onclick = () => { $("#yaml-status").replaceChildren(); refreshYaml(); };
+  $("#btn-yaml-revert").onclick = () => {
+    $("#yaml-status").replaceChildren();
+    refreshYaml();
+  };
 }
 
-/* --------------------------------------------------------------- 4. results */
+/* ------------------------------------------------------------ 4. generate */
 
 async function startRun() {
-  $("#run-progress-card").hidden = false;
-  $("#results-body").hidden = true;
+  state.job = null;
+  state.result = null;
   $("#run-error").replaceChildren();
-  reach("results");
-  show("results");
+  reach("generate");
+  show("generate");
+
+  state.settings.records = parseInt($("#cfg-records").value, 10) || 10000;
+  state.settings.seed = parseInt($("#cfg-seed").value, 10) || 42;
 
   try {
-    const { job } = await api("/api/run", {
+    const started = await call("/api/run", {
       method: "POST",
       body: JSON.stringify({
         spec: state.spec,
-        num_records: parseInt($("#cfg-records").value, 10) || 10000,
-        seed: parseInt($("#cfg-seed").value, 10) || 42,
-        periods: parseInt($("#cfg-periods").value, 10) || null,
-        scenario: $("#cfg-scenario").value || null,
+        source: state.source,
+        num_records: state.settings.records,
+        seed: state.settings.seed,
+        periods: state.settings.periods,
+        scenario: state.settings.scenario || null,
       }),
     });
-    state.job = job;
+    state.job = started.job;
+    state.jobStages = started.stages;
+    renderStages("generating", 0);
     poll();
   } catch (error) {
-    $("#run-progress-card").hidden = true;
-    $("#run-error").replaceChildren(el("div", { class: "note bad", text: error.message }));
+    $("#run-error").replaceChildren(note(error.message, "bad"));
+    status(error.message, "bad");
   }
+}
+
+function renderStages(current, progress) {
+  const list = $("#run-stages");
+  const order = state.jobStages.map((s) => s.key);
+  const at = order.indexOf(current);
+  list.replaceChildren(...state.jobStages.map((stage, i) => {
+    const done = i < at || (progress >= 1 && i <= at);
+    const active = i === at && progress < 1;
+    return el("li", { class: done ? "done" : active ? "active" : "" }, [
+      el("span", { class: "dot" }),
+      stage.label,
+    ]);
+  }));
 }
 
 async function poll() {
   if (!state.job) return;
   let job;
   try {
-    job = await api(`/api/run/${state.job}`);
+    job = await call(`/api/run/${state.job}`);
   } catch (error) {
-    $("#run-error").replaceChildren(el("div", { class: "note bad", text: error.message }));
+    $("#run-error").replaceChildren(note(error.message, "bad"));
     return;
   }
 
   $("#run-stage").textContent = job.stage || job.status;
   $("#run-pct").textContent = fmt.pct(job.progress, 0);
   $("#run-bar").style.width = `${(job.progress * 100).toFixed(1)}%`;
+  $("#run-eta").textContent = job.eta_seconds
+    ? `about ${fmt.seconds(job.eta_seconds)} left` : "";
+  renderStages(job.step || "generating", job.progress);
 
   if (job.status === "error") {
-    $("#run-progress-card").hidden = true;
-    $("#run-error").replaceChildren(el("div", { class: "note bad", text: job.error }));
-    status("Run failed.", "bad");
+    $("#run-error").replaceChildren(note(job.error, "bad"));
+    status("The run failed.", "bad");
+    show("generate");
     return;
   }
   if (job.status === "done") {
-    $("#run-progress-card").hidden = true;
     state.result = job.result;
-    renderResults(job.result);
-    status("Run complete.", "good");
+    reach("results");
+    reach("download");
+    status(`Done in ${job.result.timings.total_seconds.toFixed(1)}s.`, "good");
+    await renderResults(job.result);
+    renderDownloads(job.result);
+    show("results");
     return;
   }
-  setTimeout(poll, 450);
+  setTimeout(poll, 400);
 }
 
-function renderResults(result) {
-  $("#results-body").hidden = false;
+/* ------------------------------------------------------------- 5. results */
+
+async function renderResults(result) {
+  const rows = result.mix.reduce((sum, m) => sum + m.rows, 0);
   const validation = result.validation;
-  const survival = result.entities ? result.surviving_entities / result.entities : 0;
+
+  $("#results-lede").textContent =
+    `${fmt.int(rows)} rows across ${result.periods} cut-offs, generated with the ` +
+    `${(result.method || "distribution").replace("_", " ")} method in ` +
+    `${result.timings.total_seconds.toFixed(1)} seconds.` +
+    (result.originated
+      ? ` The pool opened with ${fmt.int(result.entities)} loans and took on ` +
+        `${fmt.int(result.originated)} more as it aged.`
+      : "");
+
+  const originated = result.originated || 0;
+  const total = result.total_entities || result.entities;
 
   $("#run-stats").replaceChildren(
-    stat("Entities", fmt.int(result.entities)),
+    stat("Rows generated", fmt.int(rows)),
+    stat("Columns", fmt.int(state.summary?.columns ?? state.spec.columns.length)),
+    stat("Entities", fmt.int(total)),
+    originated ? stat("Written later", fmt.int(originated)) : null,
     stat("Periods", fmt.int(result.periods)),
-    stat("Survived", fmt.pct(survival, 1)),
-    stat("Rows", fmt.int(result.mix.reduce((sum, m) => sum + m.rows, 0))),
-    stat("Time", `${result.timings.total_seconds.toFixed(1)}s`),
-    stat("Spec", result.spec_hash, true),
+    // Survival is measured against everything that ever entered the pool, not
+    // against the opening book, or an open pool reports over 100%.
+    stat("Surviving", fmt.pct(total ? result.surviving_entities / total : 0, 1)),
+    stat("Time taken", `${result.timings.total_seconds.toFixed(1)}s`),
+    stat("Validation",
+      validation ? (validation.passed ? "Passed" : `${validation.failed} failed`) : "—",
+      validation ? (validation.passed ? "good" : "bad") : ""),
   );
 
   const target = $("#run-validation");
   target.replaceChildren();
   if (validation) {
     const failed = validation.checks.filter((c) => !c.passed);
-    target.append(el("div", { class: `note ${validation.passed ? "good" : "bad"}`, html:
-      `<strong>${validation.total - validation.failed}/${validation.total} invariants passed</strong> — ` +
+    target.append(note(
+      `<strong>${validation.total - validation.failed} of ${validation.total} invariants passed</strong> — ` +
       (validation.passed
-        ? "the panel is consistent with everything the spec asserts."
-        : `<ul>${failed.map((c) => `<li><code class="inline">${c.name}</code> — ${fmt.int(c.violations)} violating row(s)</li>`).join("")}</ul>`) }));
+        ? "the generated panel does everything the configuration says it does."
+        : `<ul>${failed.map((c) =>
+            `<li><code class="inline">${escapeHtml(c.name)}</code> — ${
+              c.error ? escapeHtml(c.error) : `${fmt.int(c.violations)} violating row(s)`}</li>`
+          ).join("")}</ul>`),
+      validation.passed ? "good" : "bad", true));
+  }
+  const randomness = result.generation_notes?.randomness;
+  if (randomness) {
+    const applied = [
+      [randomness.correlated, "reordered to match the sample's correlation"],
+      [randomness.outliers, "given outliers"],
+      [randomness.noised, "jittered"],
+      [randomness.blanked, "blanked"],
+    ].filter(([n]) => n).map(([n, label]) => `${n} column(s) ${label}`);
+    if (applied.length) target.append(note(`Randomness applied: ${applied.join(", ")}.`));
   }
   if (result.scenario) {
-    target.append(el("div", { class: "note", html: `Scenario overlay applied: <strong>${result.scenario}</strong>.` }));
+    target.append(note(`Scenario overlay applied: <strong>${escapeHtml(result.scenario)}</strong>.`, "", true));
   }
 
-  renderMixChart(result.mix, state.spec.lifecycle);
-  renderFiles(result);
-  loadPreview(result.panel || result.files[0]);
+  await loadCharts();
+  state.table = { offset: 0, limit: 25, sort: null, descending: false, search: "" };
+  await loadTable();
 }
 
-function renderFiles(result) {
-  const files = [];
-  if (result.panel) files.push({ path: result.panel, label: "Consolidated panel" });
-  for (const path of result.files) files.push({ path, label: "Per-period tape" });
+async function loadCharts(column = null) {
+  const hosts = ["#chart-distribution", "#chart-delinquency", "#chart-ltv", "#chart-balance"];
+  hosts.forEach((h) => $(h).replaceChildren(el("div", { class: "empty" }, [
+    el("span", { class: "spin" }), "Aggregating…",
+  ])));
 
-  const table = $("#run-files");
+  try {
+    const charts = await call(`/api/charts/${state.job}${column ? `?columns=${encodeURIComponent(column)}` : ""}`);
+    state.charts = charts;
+
+    const picker = $("#chart-column");
+    if (!column) {
+      picker.replaceChildren(...charts.numeric_columns.map((name) =>
+        el("option", { value: name, text: name })));
+      picker.onchange = () => loadCharts(picker.value);
+    }
+
+    const distribution = charts.distribution.find((d) => !column || d.column === column)
+      || charts.distribution[0];
+    $("#dist-hint").textContent = charts.has_reference
+      ? "Generated data against the sample it was built from, on shared bins."
+      : "Generated data. Upload sample data in step 1 to compare it against the real thing.";
+    renderDistribution($("#chart-distribution"), distribution);
+    renderDelinquency($("#chart-delinquency"), charts.delinquency, charts.unavailable.delinquency);
+    renderLtv($("#chart-ltv"), charts.ltv, charts.unavailable.ltv);
+    renderBalance($("#chart-balance"), charts.pool_balance, charts.unavailable.pool_balance);
+  } catch (error) {
+    hosts.forEach((h) => $(h).replaceChildren(el("div", { class: "empty", text: error.message })));
+  }
+}
+
+/* the data table ------------------------------------------------------------ */
+
+async function loadTable() {
+  const t = state.table;
+  const params = new URLSearchParams({
+    offset: t.offset, limit: t.limit, descending: String(t.descending),
+  });
+  if (t.search) params.set("search", t.search);
+  if (t.sort) params.set("sort", t.sort);
+
+  try {
+    const page = await call(`/api/table/${state.job}?${params}`);
+    renderTable(page);
+  } catch (error) {
+    $("#data-table").replaceChildren(el("tbody", {}, el("tr", {},
+      el("td", { text: error.message }))));
+  }
+}
+
+function renderTable(page) {
+  const t = state.table;
+  const table = $("#data-table");
   table.replaceChildren(
+    el("thead", {}, el("tr", {}, page.columns.map((name) =>
+      el("th", {
+        class: "sortable",
+        onclick: () => {
+          t.descending = t.sort === name ? !t.descending : false;
+          t.sort = name;
+          t.offset = 0;
+          loadTable();
+        },
+      }, [name, t.sort === name ? el("span", { class: "dir", text: t.descending ? "▾" : "▴" }) : null])
+    ))),
+    el("tbody", {}, page.rows.map((row) =>
+      el("tr", {}, row.map((cell) =>
+        el("td", {
+          class: cell === null ? "nul" : typeof cell === "number" ? "num" : "",
+          text: cell === null ? "null" : typeof cell === "number"
+            ? Number(cell.toFixed(4)).toLocaleString() : String(cell),
+        })))))
+  );
+
+  const last = Math.min(page.offset + page.limit, page.total);
+  $("#table-pager").replaceChildren(
+    el("button", {
+      class: "btn ghost sm", disabled: page.offset === 0,
+      onclick: () => { t.offset = Math.max(0, t.offset - t.limit); loadTable(); },
+    }, "Previous"),
+    el("button", {
+      class: "btn ghost sm", disabled: last >= page.total,
+      onclick: () => { t.offset += t.limit; loadTable(); },
+    }, "Next"),
+    el("span", { text:
+      page.total
+        ? `Showing ${fmt.int(page.offset + 1)}–${fmt.int(last)} of ${fmt.int(page.total)} rows`
+        : "No rows match this search." }),
+  );
+}
+
+/* ------------------------------------------------------------ 6. download */
+
+const DOWNLOADS = [
+  ["csv", "CSV", "csv", "The whole panel as one comma-separated file. Opens anywhere."],
+  ["parquet", "Parquet", "parquet", "Columnar and typed. The right choice for anything that will be read by code."],
+  ["xlsx", "Excel", "xlsx", "A workbook with the data on one sheet and its provenance on another. Capped at a million rows."],
+  ["yaml", "Configuration", "yaml", "The exact configuration that produced this data. Re-run it and get the same file back."],
+  ["report", "Validation report", "html", "A standalone page listing every invariant checked and its result. Nothing external to load."],
+];
+
+function renderDownloads(result) {
+  const grid = $("#download-grid");
+  grid.replaceChildren(...DOWNLOADS.map(([format, label, ext, description]) =>
+    el("a", {
+      class: "dl",
+      href: `/api/export/${state.job}?format=${format}`,
+      download: "",
+      onclick: (e) => { e.currentTarget.classList.add("busy");
+        setTimeout(() => e.currentTarget.classList.remove("busy"), 2500); },
+    }, [
+      el("div", { class: "dl-name" }, [
+        `Download ${label}`,
+        el("span", { class: "dl-ext", text: ext }),
+      ]),
+      el("div", { class: "dl-desc", text: description }),
+    ])
+  ));
+
+  const files = [];
+  if (result.panel) files.push({ path: result.panel, label: "Consolidated panel (every period)" });
+  for (const path of result.files) files.push({ path, label: "One cut-off" });
+
+  $("#run-files").replaceChildren(
     el("thead", {}, el("tr", {}, [
       el("th", { text: "File" }), el("th", { text: "What it is" }), el("th", { text: "" }),
     ])),
-    el("tbody", {}, files.slice(0, 40).map((file) =>
+    el("tbody", {}, files.slice(0, 60).map((file) =>
       el("tr", {}, [
-        el("td", {}, el("code", { class: "inline", text: file.path.split("/").pop() })),
+        el("td", {}, el("code", { text: file.path.split("/").pop() })),
         el("td", { text: file.label }),
-        el("td", {}, el("a", { href: `/api/download?path=${encodeURIComponent(file.path)}`, text: "Download" })),
-      ])
-    ))
+        el("td", {}, el("a", {
+          href: `/api/download?path=${encodeURIComponent(file.path)}`, text: "Download",
+        })),
+      ])))
   );
-  if (files.length > 40) {
-    table.append(el("tfoot", {}, el("tr", {}, el("td", { colspan: 3 },
-      el("span", { class: "hint", text: `…and ${files.length - 40} more in .sdd-workspace.` })))));
+  if (files.length > 60) {
+    $("#run-files").append(el("tfoot", {}, el("tr", {}, el("td", { colspan: 3 },
+      el("span", { class: "hint", text: `…and ${files.length - 60} more in .sdd-workspace.` })))));
   }
 }
 
-async function loadPreview(path) {
-  if (!path) return;
-  $("#preview-hint").textContent = `First rows of ${path.split("/").pop()}.`;
-  try {
-    const { columns, rows } = await api(`/api/preview?path=${encodeURIComponent(path)}&rows=12`);
-    $("#run-preview").replaceChildren(
-      el("thead", {}, el("tr", {}, columns.map((c) => el("th", { text: c })))),
-      el("tbody", {}, rows.map((row) =>
-        el("tr", {}, row.map((cell) =>
-          el("td", { class: typeof cell === "number" ? "num" : "", text: cell === null ? "" : String(cell) })))))
-    );
-  } catch (error) {
-    $("#run-preview").replaceChildren(el("tbody", {}, el("tr", {}, el("td", { text: error.message }))));
+/* --------------------------------------------------------------- charting */
+
+const NS = "http://www.w3.org/2000/svg";
+const PALETTE = ["#3f8f7f", "#d8b34a", "#dd9040", "#c9603c", "#a63a4a", "#6d4a7c", "#7fae56", "#8d8b84"];
+
+function svgNode(tag, attrs = {}, kids = []) {
+  const node = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined) continue;
+    node.setAttribute(k, String(v));
   }
+  for (const kid of [].concat(kids)) if (kid) node.append(kid);
+  return node;
 }
 
-/* ----------------------------------------------------------------- chart */
-
-// Ordered best-first to match the spec's own state ordering, so the stack
-// reads healthy-at-the-bottom and distressed-on-top.
-const PALETTE = ["#3f8f7f", "#7fae56", "#d8b34a", "#dd9040", "#c9603c", "#a63a4a", "#6d4a7c", "#8d8b84"];
-
-function renderMixChart(mix, lifecycle) {
-  const host = $("#mix-chart");
-  host.replaceChildren();
-  if (!mix?.length) return;
-
-  const states = (lifecycle?.states || []).filter((name) => mix.some((m) => m[name]));
-  for (const period of mix) {
-    for (const key of Object.keys(period)) {
-      if (!["period", "date", "rows"].includes(key) && !states.includes(key)) states.push(key);
-    }
-  }
-
-  const W = 900, H = 300, PAD = { t: 12, r: 12, b: 34, l: 58 };
-  const innerW = W - PAD.l - PAD.r;
-  const innerH = H - PAD.t - PAD.b;
-  const peak = Math.max(...mix.map((m) => m.rows));
-  const x = (i) => PAD.l + (mix.length === 1 ? innerW / 2 : (i / (mix.length - 1)) * innerW);
-  const y = (v) => PAD.t + innerH - (v / peak) * innerH;
-
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("class", "chart");
-  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-  const ns = (tag, attrs) => {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-    return node;
+function frame(host, { width = 860, height = 280, pad = { t: 14, r: 16, b: 34, l: 54 } } = {}) {
+  const svg = svgNode("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    preserveAspectRatio: "xMidYMid meet",
+    role: "img",
+  });
+  host.replaceChildren(svg);
+  return {
+    svg,
+    width, height, pad,
+    innerW: width - pad.l - pad.r,
+    innerH: height - pad.t - pad.b,
   };
+}
 
-  // gridlines
+function gridlines(f, max, format) {
   for (let step = 0; step <= 4; step++) {
-    const value = (peak / 4) * step;
-    svg.append(ns("line", { x1: PAD.l, x2: W - PAD.r, y1: y(value), y2: y(value), class: "axis" }));
-    const label = ns("text", { x: PAD.l - 8, y: y(value) + 3, "text-anchor": "end" });
-    label.textContent = value >= 1000 ? `${Math.round(value / 1000)}k` : Math.round(value);
-    svg.append(label);
+    const value = (max / 4) * step;
+    const y = f.pad.t + f.innerH - (max ? (value / max) * f.innerH : 0);
+    f.svg.append(svgNode("line", {
+      x1: f.pad.l, x2: f.width - f.pad.r, y1: y, y2: y, class: "axis",
+    }));
+    const label = svgNode("text", { x: f.pad.l - 8, y: y + 3.5, "text-anchor": "end" });
+    label.textContent = format(value);
+    f.svg.append(label);
+  }
+}
+
+function xLabels(f, labels, count = 8) {
+  const every = Math.max(1, Math.ceil(labels.length / count));
+  labels.forEach((text, i) => {
+    if (i % every && i !== labels.length - 1) return;
+    const x = f.pad.l + (labels.length === 1 ? f.innerW / 2 : (i / (labels.length - 1)) * f.innerW);
+    const node = svgNode("text", { x, y: f.height - 11, "text-anchor": "middle" });
+    node.textContent = text;
+    f.svg.append(node);
+  });
+}
+
+function legend(host, entries) {
+  host.append(el("div", { class: "legend" }, entries.map(([label, colour]) =>
+    el("span", {}, [el("i", { style: `background:${colour}` }), label]))));
+}
+
+function empty(host, message) {
+  host.replaceChildren(el("div", { class: "empty", text: message }));
+}
+
+function renderDistribution(host, chart) {
+  if (!chart) return empty(host, "Nothing numeric to compare.");
+  const f = frame(host);
+  const series = [["Generated", chart.synthetic, PALETTE[0]]];
+  if (chart.reference) series.push(["Sample", chart.reference, PALETTE[3]]);
+
+  const peak = Math.max(...series.flatMap(([, values]) => values), 0.0001);
+  gridlines(f, peak, (v) => `${(v * 100).toFixed(0)}%`);
+
+  const n = chart.synthetic.length;
+  const x = (i) => f.pad.l + (i / n) * f.innerW;
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+
+  for (const [, values, colour] of series) {
+    // Stepped outline: a histogram is bins, and smoothing between bin centres
+    // draws a curve the data never had.
+    const points = [`${f.pad.l},${y(0)}`];
+    values.forEach((v, i) => { points.push(`${x(i)},${y(v)}`, `${x(i + 1)},${y(v)}`); });
+    points.push(`${x(n)},${y(0)}`);
+    f.svg.append(svgNode("polygon", {
+      points: points.join(" "), fill: colour, "fill-opacity": 0.28,
+      stroke: colour, "stroke-width": 1.4, "stroke-linejoin": "round",
+    }));
   }
 
-  // stacked areas, healthy at the bottom
-  let baseline = mix.map(() => 0);
-  states.forEach((name, index) => {
-    const tops = mix.map((period, i) => baseline[i] + (period[name] || 0));
-    const forward = mix.map((_, i) => `${x(i)},${y(tops[i])}`).join(" ");
-    const back = mix.map((_, i) => `${x(mix.length - 1 - i)},${y(baseline[mix.length - 1 - i])}`).join(" ");
-    svg.append(ns("polygon", {
-      points: `${forward} ${back}`,
-      fill: PALETTE[index % PALETTE.length],
-      "fill-opacity": 0.9,
+  const edges = chart.edges;
+  xLabels(f, edges.slice(0, -1).map((e) => fmt.money(e)), 7);
+  legend(host, series.map(([label, , colour]) => [label, colour]));
+
+  const stats = chart.stats;
+  const line = (label, s) => s
+    ? `${label} mean ${fmt.money(s.mean)} · median ${fmt.money(s.median)} · sd ${fmt.money(s.std)}`
+    : null;
+  host.append(el("div", { class: "chart-stats" }, [
+    el("span", { text: `${chart.column}` }),
+    el("span", { text: line("generated", stats.synthetic) }),
+    stats.reference ? el("span", { text: line("sample", stats.reference) }) : null,
+  ]));
+}
+
+function renderDelinquency(host, chart, why) {
+  if (!chart) return empty(host, why ? `No curve — ${why}.` : "No lifecycle to chart.");
+  const f = frame(host, { height: 250 });
+  const peak = Math.max(...chart.total_delinquent, 0.001) * 1.15;
+  gridlines(f, peak, (v) => `${(v * 100).toFixed(1)}%`);
+
+  const n = chart.periods.length;
+  const x = (i) => f.pad.l + (n === 1 ? f.innerW / 2 : (i / (n - 1)) * f.innerW);
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+
+  chart.series.forEach((series, index) => {
+    const colour = PALETTE[(index + 1) % PALETTE.length];
+    f.svg.append(svgNode("polyline", {
+      points: series.values.map((v, i) => `${x(i)},${y(v)}`).join(" "),
+      fill: "none", stroke: colour, "stroke-width": 1.8,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
     }));
-    baseline = tops;
   });
+  f.svg.append(svgNode("polyline", {
+    points: chart.total_delinquent.map((v, i) => `${x(i)},${y(v)}`).join(" "),
+    fill: "none", stroke: PALETTE[0], "stroke-width": 2.4, "stroke-dasharray": "5 3",
+  }));
 
-  // x labels, thinned so they never collide
-  const every = Math.max(1, Math.ceil(mix.length / 8));
-  mix.forEach((period, i) => {
-    if (i % every && i !== mix.length - 1) return;
-    const label = ns("text", { x: x(i), y: H - 12, "text-anchor": "middle" });
-    label.textContent = period.date.slice(0, 7);
-    svg.append(label);
-  });
+  xLabels(f, chart.periods.map((p) => String(p).slice(0, 7)), 7);
+  legend(host, [
+    ...chart.series.map((s, i) => [s.state, PALETTE[(i + 1) % PALETTE.length]]),
+    ["all distressed", PALETTE[0]],
+  ]);
+}
 
-  host.append(svg);
-  host.append(el("div", { class: "legend" }, states.map((name, index) =>
-    el("span", {}, [
-      el("i", { style: `background:${PALETTE[index % PALETTE.length]}` }),
-      name,
-    ]))));
+function renderLtv(host, chart, why) {
+  if (!chart) return empty(host, why ? `No chart — ${why}.` : "No LTV column found.");
+  const f = frame(host, { height: 250 });
+  const series = [
+    [`First cut-off`, chart.first.values, PALETTE[0]],
+    [`Last cut-off`, chart.last.values, PALETTE[2]],
+  ];
+  const peak = Math.max(...series.flatMap(([, v]) => v), 0.0001);
+  gridlines(f, peak, (v) => `${(v * 100).toFixed(0)}%`);
+
+  const n = chart.first.values.length;
+  const x = (i) => f.pad.l + (i / n) * f.innerW;
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+
+  for (const [, values, colour] of series) {
+    const points = [`${f.pad.l},${y(0)}`];
+    values.forEach((v, i) => { points.push(`${x(i)},${y(v)}`, `${x(i + 1)},${y(v)}`); });
+    points.push(`${x(n)},${y(0)}`);
+    f.svg.append(svgNode("polygon", {
+      points: points.join(" "), fill: colour, "fill-opacity": 0.26,
+      stroke: colour, "stroke-width": 1.4,
+    }));
+  }
+
+  xLabels(f, chart.edges.slice(0, -1).map((e) => e.toFixed(0)), 7);
+  legend(host, series.map(([label, , colour]) => [label, colour]));
+  host.append(el("div", { class: "chart-stats" }, [
+    el("span", { text: chart.column }),
+    el("span", { text: `first mean ${chart.first.mean.toFixed(1)}` }),
+    el("span", { text: `last mean ${chart.last.mean.toFixed(1)}` }),
+  ]));
+}
+
+function renderBalance(host, chart, why) {
+  if (!chart) return empty(host, why ? `No chart — ${why}.` : "No balance column found.");
+  const f = frame(host);
+  const peak = Math.max(...chart.balance, 1);
+  gridlines(f, peak, (v) => fmt.money(v));
+
+  const n = chart.periods.length;
+  const x = (i) => f.pad.l + (n === 1 ? f.innerW / 2 : (i / (n - 1)) * f.innerW);
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+
+  const line = chart.balance.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  f.svg.append(svgNode("polygon", {
+    points: `${f.pad.l},${y(0)} ${line} ${x(n - 1)},${y(0)}`,
+    fill: PALETTE[0], "fill-opacity": 0.22,
+  }));
+  f.svg.append(svgNode("polyline", {
+    points: line, fill: "none", stroke: PALETTE[0], "stroke-width": 2,
+    "stroke-linejoin": "round",
+  }));
+
+  xLabels(f, chart.periods.map((p) => String(p).slice(0, 7)), 8);
+  legend(host, [[`total ${chart.column}`, PALETTE[0]]]);
+  const lastFactor = chart.factor[chart.factor.length - 1];
+  host.append(el("div", { class: "chart-stats" }, [
+    el("span", { text: `opening ${fmt.money(chart.balance[0])}` }),
+    el("span", { text: `closing ${fmt.money(chart.balance[chart.balance.length - 1])}` }),
+    el("span", { text: `pool factor ${lastFactor.toFixed(3)}` }),
+    el("span", { text: `${fmt.int(chart.loans[chart.loans.length - 1])} loans left` }),
+  ]));
 }
 
 /* ------------------------------------------------------------------- wire */
 
+function wireTabs() {
+  const tabs = $$("#config-tabs .tab");
+  tabs.forEach((tab) => {
+    tab.onclick = () => {
+      tabs.forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
+      $$(".tabpane").forEach((pane) => {
+        pane.hidden = pane.id !== `tab-${tab.dataset.tab}`;
+      });
+    };
+  });
+}
+
 function wireNav() {
-  $$(".step").forEach((button) => {
-    button.onclick = () => { if (state.reachable[button.dataset.view]) show(button.dataset.view); };
+  $$(".rail .step").forEach((button) => {
+    button.onclick = () => {
+      if (state.reachable[button.dataset.view]) show(button.dataset.view);
+    };
   });
   $("#btn-back").onclick = () => {
     const order = VIEWS.filter((v) => state.reachable[v]);
     const at = order.indexOf(state.view);
     show(order[Math.max(0, at - 1)]);
   };
-  $("#btn-next").onclick = () => {
-    if (state.view === "configure") return startRun();
-    if (state.view === "results") return show("configure");
-    const order = VIEWS.filter((v) => state.reachable[v]);
-    const at = order.indexOf(state.view);
-    show(order[Math.min(order.length - 1, at + 1)]);
-  };
+  $("#btn-next").onclick = goNext;
+
   $("#cfg-filter").oninput = renderColumns;
+  $("#cfg-records").onchange = (e) => {
+    state.settings.records = Math.max(1, parseInt(e.target.value, 10) || 1);
+    updateSizeNote();
+  };
+  $("#cfg-seed").onchange = (e) => {
+    state.settings.seed = parseInt(e.target.value, 10) || 42;
+  };
+  $("#table-search").oninput = debounce((e) => {
+    state.table.search = e.target.value.trim();
+    state.table.offset = 0;
+    loadTable();
+  }, 320);
 }
 
 async function boot() {
   wireNav();
-  wireUpload();
+  wireTabs();
   wireYaml();
+  wireDrop("#drop-schema", "#file-schema", "schema");
+  wireDrop("#drop-sample", "#file-sample", "sample");
   try {
     await loadPacks();
   } catch (error) {
     status(`Could not reach the server: ${error.message}`, "bad");
   }
-  show("source");
+  show("upload");
 }
 
 boot();
