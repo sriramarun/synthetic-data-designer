@@ -103,7 +103,8 @@ spec the engine would reject — and every control writes into the configuration
 whatever the forms do, the YAML tab shows.
 
 **[→ The user guide](docs/USER-GUIDE.md)** walks every screen and every setting,
-including the ones only the YAML exposes.
+including the ones only the YAML exposes. **[→ Hosting it](docs/DEPLOYMENT.md)**
+covers Hugging Face Spaces and what changes when the instance is shared.
 
 Or drive it from the command line:
 
@@ -371,7 +372,7 @@ That is the seam a web UI plugs into — the CLI is simply its first consumer.
 | **M7** six-step web UI: upload → review → configure → generate → results → download | done |
 | **M8** open pools: new loans written during the ageing window | done |
 
-416 tests. `pytest` green and `ruff` clean on every commit.
+423 tests. `pytest` green and `ruff` clean on every commit.
 
 Honest scope notes:
 

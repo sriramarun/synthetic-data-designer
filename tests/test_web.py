@@ -573,3 +573,80 @@ def test_static_assets_must_be_revalidated(client):
         response = client.get(asset)
         assert response.status_code == 200, asset
         assert "no-cache" in response.headers.get("cache-control", ""), asset
+
+
+# ---------------------------------------------------------------------------
+# hosting this for other people
+# ---------------------------------------------------------------------------
+
+
+def test_a_local_instance_claims_nothing_and_limits_nothing(client):
+    """The defaults are the local ones: no ceilings, and the page is free to go
+    on saying nothing leaves this machine."""
+    meta = client.get("/api/meta").json()
+    assert meta["shared"] is False
+    assert meta["limits"] == {"records": None, "periods": None, "upload_mb": None}
+
+
+def test_a_shared_instance_says_so(client, monkeypatch):
+    """The front end swaps its privacy copy for a warning on the strength of
+    this flag, so it has to reach the browser."""
+    monkeypatch.setattr(web, "SHARED", True)
+    monkeypatch.setattr(web, "MAX_RECORDS", 50_000)
+    meta = client.get("/api/meta").json()
+
+    assert meta["shared"] is True
+    assert meta["limits"]["records"] == 50_000
+
+
+def test_a_run_over_the_row_ceiling_is_refused(client, monkeypatch):
+    monkeypatch.setattr(web, "MAX_RECORDS", 1_000)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+
+    response = client.post("/api/run", json={"spec": spec, "num_records": 5_000, "periods": 2})
+    assert response.status_code == 400
+    problems = response.json()["problems"]
+    assert "up to 1,000 rows" in problems[0]
+    # It says where to go for more, rather than only saying no.
+    assert "locally" in problems[0]
+
+
+def test_a_run_over_the_period_ceiling_is_refused(client, monkeypatch):
+    monkeypatch.setattr(web, "MAX_PERIODS", 6)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+
+    response = client.post("/api/run", json={"spec": spec, "num_records": 50, "periods": 24})
+    assert response.status_code == 400
+    assert "up to 6 periods" in response.json()["problems"][0]
+
+
+def test_the_ceiling_reads_the_spec_when_periods_are_not_overridden(client, monkeypatch):
+    """A 24-period pack run without an explicit override is still 24 periods."""
+    monkeypatch.setattr(web, "MAX_PERIODS", 6)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+
+    response = client.post("/api/run", json={"spec": spec, "num_records": 50})
+    assert response.status_code == 400
+
+
+def test_an_oversized_upload_is_refused_and_not_kept(client, monkeypatch):
+    """Checked as it streams, so a stranger cannot fill a shared disk by
+    declaring one size and sending another."""
+    monkeypatch.setattr(web, "MAX_UPLOAD_BYTES", 4096)
+
+    response = client.post(
+        "/api/upload",
+        files={"file": ("big.csv", io.BytesIO(_tape_csv(2000)), "text/csv")},
+        data={"kind": "sample"},
+    )
+    assert response.status_code == 413
+    assert "MB" in response.json()["detail"]
+
+    uploads = web.WORKSPACE / "uploads"
+    assert not uploads.exists() or not list(uploads.iterdir())
+
+
+def test_an_upload_inside_the_ceiling_still_works(client, monkeypatch):
+    monkeypatch.setattr(web, "MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
+    stored = _upload(client, "tape.csv", _tape_csv())
+    assert "loan_id" in stored["columns"]

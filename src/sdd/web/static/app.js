@@ -340,10 +340,41 @@ async function analyse() {
   }
 }
 
+function describeInstance(meta) {
+  // Run locally the page says nothing leaves this machine, and that is true.
+  // Hosted, it is false: uploads land on someone else's disk in a workspace
+  // every visitor shares. Saying it anyway would be lying to the person
+  // deciding whether to upload a real tape.
+  if (!meta.shared) return;
+
+  $("#upload-lede").textContent =
+    "Give it a schema and, if you have one, data to learn from. This is a shared demo, " +
+    "so read the notice below before uploading anything real.";
+
+  const limits = meta.limits || {};
+  const bounds = [
+    limits.records && `${fmt.int(limits.records)} rows per run`,
+    limits.periods && `${limits.periods} periods`,
+    limits.upload_mb && `${limits.upload_mb} MB uploads`,
+  ].filter(Boolean);
+
+  $("#shared-notice").replaceChildren(note(
+    "<strong>This is a hosted, shared instance.</strong> Anything you upload is written to " +
+    "the server's disk, into a workspace shared with every other visitor, and the operator " +
+    "of this instance can read it. Storage is temporary and is wiped when the instance " +
+    "restarts, so download what you generate before you leave." +
+    (bounds.length ? ` Limited to ${bounds.join(", ")}.` : "") +
+    "<br><br>Do not upload confidential data. To use your own tapes privately, run it on " +
+    "your own machine: <code class=\"inline\">pip install 'sdd[web]'</code> then " +
+    "<code class=\"inline\">sdd ui</code> — then nothing leaves it.",
+    "warn", true));
+}
+
 async function loadPacks() {
   const meta = await call("/api/meta");
   state.meta = meta;
   $("#version").textContent = `v${meta.version}`;
+  describeInstance(meta);
 
   const list = $("#packs");
   list.replaceChildren();

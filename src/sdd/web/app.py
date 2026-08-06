@@ -30,7 +30,7 @@ Four design choices worth stating:
 
 from __future__ import annotations
 
-import shutil
+import os
 import threading
 import time
 import uuid
@@ -47,11 +47,41 @@ from sdd import __version__, api
 STATIC = Path(__file__).parent / "static"
 
 # Uploads and outputs live here. One directory keeps cleanup and the download
-# path check simple.
-WORKSPACE = Path.cwd() / ".sdd-workspace"
+# path check simple. Overridable because a container's working directory is
+# often read-only, and the writable path is not knowable at build time.
+WORKSPACE = Path(os.environ.get("SDD_WORKSPACE") or Path.cwd() / ".sdd-workspace")
 
 # A tape big enough to profile but small enough to keep the UI responsive.
 PROFILE_ROW_LIMIT = 200_000
+
+
+def _limit(name: str) -> int | None:
+    """An optional ceiling, read from the environment. None means no ceiling."""
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw else 0
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+# Ceilings for a *shared* deployment. All unset by default, because the tool is
+# a local one and a person generating on their own laptop should not be told
+# what they may ask for. A hosted instance is a different situation: it is one
+# machine serving strangers, and an unbounded run there is a denial of service
+# with extra steps.
+MAX_RECORDS = _limit("SDD_MAX_RECORDS")
+MAX_PERIODS = _limit("SDD_MAX_PERIODS")
+MAX_UPLOAD_BYTES = (_limit("SDD_MAX_UPLOAD_MB") or 0) * 1024 * 1024 or None
+
+# Whether this instance is shared with people who cannot see the filesystem.
+#
+# It changes what the interface is allowed to claim. Run locally, the page says
+# nothing leaves this machine, and that is true. Hosted, it is false — uploads
+# land on someone else's disk, in a workspace every visitor shares — and an
+# interface that keeps saying it would be lying to the person deciding whether
+# to upload a real loan tape.
+SHARED = bool(os.environ.get("SDD_SHARED"))
 
 # What the upload box accepts, split by what the file is for. A schema may be a
 # taxonomy or a data dictionary; a sample is always data.
@@ -100,6 +130,12 @@ def meta() -> dict[str, Any]:
         "deep_models": api._deep_available(),
         "schema_formats": sorted({s.lstrip(".") for s in SCHEMA_SUFFIXES}),
         "sample_formats": sorted({s.lstrip(".") for s in SAMPLE_SUFFIXES}),
+        "shared": SHARED,
+        "limits": {
+            "records": MAX_RECORDS,
+            "periods": MAX_PERIODS,
+            "upload_mb": (MAX_UPLOAD_BYTES // (1024 * 1024)) if MAX_UPLOAD_BYTES else None,
+        },
     }
 
 
@@ -173,8 +209,11 @@ async def upload(file: UploadFile = File(...), kind: str = Form("sample")) -> di
         )
 
     stored = _uploads() / f"{uuid.uuid4().hex[:8]}{suffix}"
-    with stored.open("wb") as handle:
-        shutil.copyfileobj(file.file, handle)
+    try:
+        _store(file, stored)
+    except ValueError as exc:
+        stored.unlink(missing_ok=True)
+        raise HTTPException(413, str(exc)) from exc
 
     try:
         detail = _describe(stored, kind)
@@ -189,6 +228,26 @@ async def upload(file: UploadFile = File(...), kind: str = Form("sample")) -> di
         "size_bytes": stored.stat().st_size,
         **detail,
     }
+
+
+def _store(file: UploadFile, target: Path) -> None:
+    """Write an upload to disk, refusing one that exceeds the size ceiling.
+
+    Copied in chunks and checked as it goes, rather than trusting the declared
+    content length or writing the whole thing and measuring afterwards — neither
+    of which stops a stranger filling a shared disk.
+    """
+    written = 0
+    with target.open("wb") as handle:
+        while chunk := file.file.read(1024 * 1024):
+            written += len(chunk)
+            if MAX_UPLOAD_BYTES is not None and written > MAX_UPLOAD_BYTES:
+                raise ValueError(
+                    f"this instance accepts uploads up to "
+                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB. Take a sample of the tape — "
+                    "the distributions settle long before a large file is exhausted."
+                )
+            handle.write(chunk)
 
 
 def _describe(path: Path, kind: str) -> dict[str, Any]:
@@ -536,6 +595,11 @@ def start_run(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             400,
         )
 
+    records = int(payload.get("num_records") or 10_000)
+    periods = int(payload.get("periods") or spec["entity"]["calendar"]["periods"])
+    if problems := _over_the_ceiling(records, periods):
+        return JSONResponse({"error": "this instance has run limits", "problems": problems}, 400)
+
     job_id = uuid.uuid4().hex[:12]
     out_dir = _workspace() / "runs" / job_id
     with _jobs_lock:
@@ -558,13 +622,32 @@ def start_run(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         job_id,
         spec,
         out_dir,
-        int(payload.get("num_records") or 10_000),
+        records,
         int(payload.get("seed") or 42),
         payload.get("periods") or None,
         payload.get("scenario") or None,
         sample_path,
     )
     return {"job": job_id, "stages": [{"key": k, "label": v} for k, v in STAGES]}
+
+
+def _over_the_ceiling(records: int, periods: int) -> list[str]:
+    """Whether a requested run exceeds what a shared instance will do.
+
+    Both ceilings are unset unless someone deployed this for other people, so a
+    local run is never told what it may ask for.
+    """
+    problems = []
+    if MAX_RECORDS is not None and records > MAX_RECORDS:
+        problems.append(
+            f"This instance generates up to {MAX_RECORDS:,} rows at a time, and this run asks "
+            f"for {records:,}. Run it locally for more — `pip install sdd` and `sdd ui`."
+        )
+    if MAX_PERIODS is not None and periods > MAX_PERIODS:
+        problems.append(
+            f"This instance ages up to {MAX_PERIODS} periods, and this run asks for {periods}."
+        )
+    return problems
 
 
 def _execute(
