@@ -82,6 +82,19 @@ def test_no_ceiling_by_default(tmp_path):
     assert result["total_rows"] > 0
 
 
+def test_entities_times_periods_overstates_a_closed_pool(tmp_path):
+    """Why the ceiling cannot be pre-checked as `entities x periods`.
+
+    Entities reaching a terminal state are dropped and stop producing rows, so
+    the product is an upper bound on a closed pool. Treating it as a lower one
+    refuses runs that would have fitted.
+    """
+    result = api.run(_spec(periods=24), 500, tmp_path, seed=3)
+
+    assert result["total_rows"] < 500 * 24
+    assert result["surviving_entities"] < 500
+
+
 def test_the_count_is_rows_written_not_surviving_entities(tmp_path):
     """`total_rows` is what the ceiling is compared against, so pin its meaning."""
     result = api.run(_spec(periods=6), 300, tmp_path, seed=3)

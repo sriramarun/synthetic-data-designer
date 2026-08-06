@@ -169,18 +169,24 @@ entities aged 30 periods at `originations.rate: 1.0` produce **413,938 rows**,
 896 MB of memory and 156 MB on disk — from a request that reads as a thousand
 loans. And the spec is posted by the browser, so a visitor can set that field.
 
-So `SDD_MAX_RECORDS` bounds nothing on its own. `SDD_MAX_ROWS` is checked two
-ways:
+So `SDD_MAX_RECORDS` bounds nothing on its own.
 
-1. **Before the run**, against `entities × periods` — the floor the run cannot
-   go below. Cheap, and it refuses the obvious cases with a clear message.
-2. **During the run**, per period, against the running row count. This is the
-   real limit. A projection would have to model originations, terminal-state
-   exits and the scenario overlay, and a projection that is wrong is worse than
-   no limit, because it reads as one and does not hold.
+`SDD_MAX_ROWS` is checked **during the run**, per period, against the running
+row count — and nowhere else. There is no pre-check, on purpose.
 
-When the run trips the ceiling it stops at that period, deletes its partial
-output, and reports how far it got. It never materialises the panel.
+The tempting one is `entities × periods > SDD_MAX_ROWS`, and it is wrong in the
+direction that costs you users. Entities that reach a terminal state are dropped
+and stop producing rows, so the product *over*-states a closed pool: 50,000
+entities over 60 periods is 2,033,298 rows, not 3,000,000. Refuse on it and you
+turn away runs that would have fitted, with a message the person cannot argue
+with, because they cannot know the survival curve in advance. Originations break
+the bound the other way. It is not reliable in either direction.
+
+Counting the actual rows is. The loop stops at the period that crosses the line,
+so the work wasted by not rejecting early is bounded by the ceiling itself.
+
+When a run trips the ceiling it stops at that period, deletes its partial output,
+and reports how far it got. It never materialises the panel.
 
 Set it to what the box can hold. On 16 GB, 2.5M rows peaks around 2.2 GB, and
 the run pool is two workers, so budget for two.

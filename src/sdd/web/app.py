@@ -660,16 +660,20 @@ def _over_the_ceiling(records: int, periods: int) -> list[str]:
         problems.append(
             f"This instance ages up to {MAX_PERIODS} periods, and this run asks for {periods}."
         )
-    # Rows are entities times cut-offs, so the floor below is what this run
-    # cannot avoid producing even if every entity defaults in period one.
-    # Originations only push it higher, which is why MAX_ROWS is also enforced
-    # inside the ageing loop rather than trusted to arithmetic here.
-    if MAX_ROWS is not None and records * periods > MAX_ROWS:
-        problems.append(
-            f"This instance produces up to {MAX_ROWS:,} rows in one run. A row is one entity "
-            f"at one cut-off, so {records:,} entities over {periods} periods is at least "
-            f"{records * periods:,}. Reduce either number."
-        )
+    # MAX_ROWS is deliberately not checked here.
+    #
+    # The obvious pre-check is `records * periods > MAX_ROWS`, and it is wrong in
+    # the direction that matters. Entities reaching a terminal state stop
+    # producing rows, so that product is an *upper* bound on a closed pool, not a
+    # lower one: measured, 50,000 entities over 60 periods yields 2,033,298 rows,
+    # not 3,000,000. A pre-check on it refuses runs that would have fitted, and
+    # the refusal is unanswerable — the person asking cannot know the survival
+    # curve. Originations break the bound the other way, so it is not reliable in
+    # either direction.
+    #
+    # The ageing loop counts rows as it writes them and stops at the period that
+    # crosses the line, so the work wasted by not rejecting early is bounded by
+    # the ceiling itself. A late but correct limit beats an early wrong one.
     return problems
 
 

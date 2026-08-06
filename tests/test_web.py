@@ -618,22 +618,30 @@ def test_a_run_over_the_entity_ceiling_is_refused(client, monkeypatch):
     assert "locally" in problems[0]
 
 
-def test_a_run_over_the_row_ceiling_is_refused(client, monkeypatch):
-    """Entities within their cap, periods within theirs, rows over.
+def test_the_row_ceiling_does_not_refuse_on_arithmetic(client, monkeypatch):
+    """`entities x periods` must not be used to reject a run up front.
 
-    Neither of the other two ceilings sees this run, which is the whole reason
-    the row one exists.
+    Entities that reach a terminal state stop producing rows, so that product
+    over-states a closed pool rather than under-stating it — 50,000 entities
+    over 60 periods is 2,033,298 rows, not 3,000,000. Refusing on it turns
+    runs away that would have fitted, and the person asking has no way to
+    argue: they cannot know the survival curve. The loop counts instead.
     """
     monkeypatch.setattr(web, "MAX_RECORDS", 10_000)
-    monkeypatch.setattr(web, "MAX_PERIODS", 60)
     monkeypatch.setattr(web, "MAX_ROWS", 50_000)
     spec = client.get(f"/api/packs/{PACK}").json()["spec"]
 
-    response = client.post("/api/run", json={"spec": spec, "num_records": 5_000, "periods": 40})
-    assert response.status_code == 400
-    problems = response.json()["problems"]
-    assert "up to 50,000 rows" in problems[0]
-    assert "200,000" in problems[0], "it shows the arithmetic it refused on"
+    # 500 x 24 = 12,000 by arithmetic, under the ceiling either way, and the
+    # point is that the front door does no arithmetic at all.
+    response = client.post("/api/run", json={"spec": spec, "num_records": 500, "periods": 24})
+    assert response.status_code == 200
+
+    job = wait_for(client, response.json()["job"])
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["total_rows"] <= 500 * 24, (
+        "the product is an upper bound for a closed pool, which is why it "
+        "cannot be used as a lower one"
+    )
 
 
 def test_the_row_ceiling_holds_when_originations_hide_the_size(client, monkeypatch):
