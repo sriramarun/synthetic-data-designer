@@ -34,6 +34,19 @@ RUN mkdir -p /home/user/workspace
 ENV SDD_WORKSPACE=/home/user/workspace
 
 # Ceilings, because this is one machine serving strangers. Unset for local use.
+#
+# Sized against CPU Basic — 2 vCPU, 16 GB RAM, 50 GB of non-persistent disk —
+# and against what a run actually costs, measured rather than guessed:
+#
+#     entities x periods      rows        peak RSS     workspace
+#      5,000 x 12             58k          471 MB         32 MB
+#     20,000 x 24            447k        1,437 MB        241 MB
+#     50,000 x 24          1,117k        2,518 MB        603 MB
+#
+# So the 50,000 ceiling peaks around 2.5 GB. Two of those at once — the run pool
+# is two workers — is 5 GB, comfortably inside 16 GB. Raising it is fine here and
+# is not fine on a 512 MB box elsewhere, which is why the number lives in an
+# environment variable rather than in the code.
 ENV SDD_SHARED=1 \
     SDD_MAX_RECORDS=50000 \
     SDD_MAX_PERIODS=60 \
