@@ -403,7 +403,54 @@ def test_round_trip_fidelity_is_honest(tmp_path):
     # halves — so this pins behaviour at the size the test actually runs.
     assert len(report.failures) / len(report.columns) < 0.45
 
-    # But the joint structure does not survive independent sampling, and saying
-    # otherwise would be a lie. This is what the optional CTGAN polish step and
-    # hand-written `derivations` exist to fix.
-    assert report.correlation_delta is not None and report.correlation_delta > 0.5
+    # The joint structure survives too, which independent sampling alone cannot
+    # manage: the profiler measures the sample's rank correlation and the
+    # randomness stage reorders the generated columns to match it. Before that
+    # existed this same assertion read `> 0.5`, and the gap it recorded is what
+    # the reordering closes.
+    assert report.correlation_delta is not None and report.correlation_delta < 0.20
+
+
+def test_a_balance_that_falls_by_a_fixed_amount_is_not_also_a_counter():
+    """A steadily amortising balance looks exactly like a counter to the panel
+    learner. Keeping both makes the spec contradict itself, so amortisation —
+    which owns the balance — wins and the counter is dropped."""
+    rows = []
+    for period in range(4):
+        for i in range(200):
+            rows.append(
+                {
+                    "loan_id": f"L{i:05d}",
+                    "reporting_date": f"2024-0{period + 1}-28",
+                    "current_balance": 200_000 + i * 137 - period * 900,
+                    "remaining_term_months": 240 - period,
+                    "status": "Performing" if i % 5 else "Defaulted",
+                }
+            )
+    frame = pd.DataFrame(rows)
+
+    profile = profile_dataset(frame)
+    # The learner does report it as both — that is what makes this worth testing.
+    assert "current_balance" in {c["column"] for c in profile.dynamics["counters"]}
+
+    spec = spec_from_profile(profile, name="t")
+    assert spec.dynamics.amortisation.balance == "current_balance"
+    assert [c.column for c in spec.dynamics.counters] == ["remaining_term_months"]
+
+
+def test_profiling_can_be_capped_so_a_caller_is_not_left_waiting():
+    """The UI bounds how much of a large tape it reads. Distribution shapes
+    settle long before a tape is exhausted, so the cap changes the wait rather
+    than the answer."""
+    rows = 4000
+    frame = pd.DataFrame(
+        {
+            "loan_id": [f"L{i:05d}" for i in range(rows)],
+            "reporting_date": "2024-01-31",
+            "balance": np.random.default_rng(1).lognormal(12, 0.4, rows).round(2),
+        }
+    )
+    spec, profile = build_spec(frame, name="capped", max_rows=500)
+
+    assert profile.rows == 500
+    assert spec.column("balance").generator is not None

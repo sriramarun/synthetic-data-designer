@@ -42,9 +42,27 @@ def build_book(
     *,
     seed: int = 42,
     backend: str = "numpy",
+    sample: pd.DataFrame | None = None,
+    notes: dict[str, Any] | None = None,
+    id_offset: int = 0,
+    at: str | None = None,
     progress: ProgressFn | None = None,
 ) -> pd.DataFrame:
-    """Generate the period-0 book with ``num_records`` entities."""
+    """Generate a book of ``num_records`` entities.
+
+    Usually this is the period-0 book. An open pool builds it again at later
+    cut-offs for the entities joining then, which is what ``id_offset`` and
+    ``at`` are for: the first continues the identifier sequence past the
+    entities that already exist, the second stamps the cut-off they join on.
+
+    ``sample`` is the real tape the spec was profiled from, when there is one. It
+    is only read by the deep generation methods (``ctgan``, ``hybrid``), which
+    learn from it directly; every other method works from the spec alone.
+
+    ``notes``, when given, is filled with what the randomness controls and the
+    deep model actually did — a slider that silently did nothing is worse than no
+    slider, so the caller is given the means to say.
+    """
     if num_records < 1:
         raise GenerationError(f"num_records must be at least 1, got {num_records}")
 
@@ -59,17 +77,30 @@ def build_book(
 
         df = sample_columns_nemo(spec, num_records, seed=seed)
     else:
-        df = _sample_columns(spec, num_records, rng, report)
+        df = _sample_columns(spec, num_records, rng, report, id_offset)
+
+    if spec.generation.needs_sample:
+        report("deep model", 0.52)
+        df, polish_note = _polish(spec, df, sample)
+        if notes is not None:
+            notes["polish"] = polish_note
+
+    report("randomness", 0.54)
+    from sdd.generate.randomness import apply_randomness
+
+    df, randomness = apply_randomness(spec, df, rng)
+    if notes is not None:
+        notes["randomness"] = randomness
 
     report("constants", 0.55)
     df = _apply_constants(spec, df)
 
     report("identifiers", 0.6)
-    df = _apply_id_format(spec, df)
+    df = _apply_id_format(spec, df, id_offset)
 
     report("time column", 0.62)
     dates = period_dates(spec.entity.calendar)
-    df[spec.entity.time_column] = dates[0].strftime("%Y-%m-%d")
+    df[spec.entity.time_column] = at or dates[0].strftime("%Y-%m-%d")
 
     # Apply the lifecycle's per-state values before derivations so period 0 and
     # every later period agree on what a state implies. Without this the book
@@ -93,18 +124,45 @@ def build_book(
 
 
 def _sample_columns(
-    spec: DesignSpec, n: int, rng: np.random.Generator, report: ProgressFn
+    spec: DesignSpec, n: int, rng: np.random.Generator, report: ProgressFn, id_offset: int = 0
 ) -> pd.DataFrame:
     df = pd.DataFrame(index=pd.RangeIndex(n))
     sampled = [c for c in spec.columns if c.generator is not None]
     for i, col in enumerate(sampled):
         try:
-            df[col.name] = sample(col.generator, n, rng, df)
+            df[col.name] = sample(col.generator, n, rng, df, id_offset)
         except Exception as exc:
             raise GenerationError(f"column {col.name!r} failed to sample: {exc}") from exc
         if sampled:
             report(f"sampling {col.name}", 0.5 * (i + 1) / len(sampled))
     return df
+
+
+def _polish(
+    spec: DesignSpec, df: pd.DataFrame, sample: pd.DataFrame | None
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Hand the book to a deep tabular model trained on the real tape.
+
+    Refused rather than silently downgraded when there is no sample: a deep model
+    trained on rule-based output can only learn the independence that output
+    already has, so running it would cost minutes and change nothing.
+    """
+    from sdd.polish.ctgan import polish_book
+
+    if sample is None or sample.empty:
+        raise GenerationError(
+            f"generation.method is {spec.generation.method!r}, which learns from the real tape, "
+            "but no sample data was provided. Upload sample data, or choose a method that works "
+            "from the schema alone (distribution, statistical, sampling, rule_based)."
+        )
+    polished, report = polish_book(
+        df,
+        spec,
+        seed_data=sample,
+        model=spec.generation.polish_model,
+        epochs=spec.generation.polish_epochs,
+    )
+    return polished, report
 
 
 def _apply_constants(spec: DesignSpec, df: pd.DataFrame) -> pd.DataFrame:
@@ -113,13 +171,16 @@ def _apply_constants(spec: DesignSpec, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _apply_id_format(spec: DesignSpec, df: pd.DataFrame) -> pd.DataFrame:
+def _apply_id_format(spec: DesignSpec, df: pd.DataFrame, id_offset: int = 0) -> pd.DataFrame:
     fmt = spec.entity.id_format
     if not fmt:
         return df
     context: dict[str, Any] = {**spec.params, **spec.constants}
+    start = id_offset + 1
     try:
-        df[spec.entity.id_column] = [fmt.format(seq=i, **context) for i in range(1, len(df) + 1)]
+        df[spec.entity.id_column] = [
+            fmt.format(seq=i, **context) for i in range(start, start + len(df))
+        ]
     except KeyError as exc:
         raise GenerationError(
             f"entity.id_format {fmt!r} uses placeholder {exc} which is not in "
@@ -221,10 +282,13 @@ _PANDAS_DTYPE: dict[DType, str] = {
 
 def _coerce(series: pd.Series, dtype: DType) -> pd.Series:
     if dtype == "date":
-        return pd.to_datetime(series).dt.strftime("%Y-%m-%d")
+        return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d")
     if dtype == "int":
         # Round first: float -> int truncates, which quietly biases counters low.
-        return np.round(pd.to_numeric(series, errors="coerce")).astype("int64")
+        numeric = np.round(pd.to_numeric(series, errors="coerce"))
+        # A blanked value has no integer, so the column becomes pandas' nullable
+        # integer rather than failing. Only reached when missing values are on.
+        return numeric.astype("Int64" if numeric.isna().any() else "int64")
     if dtype == "float":
         return pd.to_numeric(series, errors="coerce").astype("float64")
     return series.astype(_PANDAS_DTYPE[dtype])

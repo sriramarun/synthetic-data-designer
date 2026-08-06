@@ -322,7 +322,7 @@ def test_a_data_dictionary_supplies_types(tmp_path):
 
 
 def test_an_unreadable_structure_format_is_refused(tmp_path):
-    path = tmp_path / "structure.xlsx"
-    path.write_bytes(b"not really a spreadsheet")
-    with pytest.raises(ValueError, match="cannot read a structure definition"):
+    path = tmp_path / "structure.docx"
+    path.write_bytes(b"not really a schema")
+    with pytest.raises(ValueError, match="cannot read a schema definition"):
         load_template(path)

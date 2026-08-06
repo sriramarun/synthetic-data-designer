@@ -145,26 +145,71 @@ def _tape_csv(rows: int = 400) -> bytes:
     return frame.to_csv(index=False).encode()
 
 
-def test_upload_then_design_produces_a_runnable_spec(client):
-    upload = client.post(
-        "/api/upload", files={"file": ("tape.csv", io.BytesIO(_tape_csv()), "text/csv")}
+def _upload(client, name: str, body: bytes, kind: str = "sample") -> dict:
+    response = client.post(
+        "/api/upload",
+        files={"file": (name, io.BytesIO(body), "application/octet-stream")},
+        data={"kind": kind},
     )
-    assert upload.status_code == 200, upload.text
-    stored = upload.json()
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_upload_then_analyse_produces_a_runnable_spec(client):
+    stored = _upload(client, "tape.csv", _tape_csv())
     assert "loan_id" in stored["columns"]
 
-    designed = client.post("/api/design", json={"file": stored["file"], "name": "uploaded"}).json()
-    assert designed["profile"]["id_column"] == "loan_id"
-    assert designed["profile"]["time_column"] == "reporting_date"
-    assert client.post("/api/check", json=designed["spec"]).json()["valid"]
+    analysed = client.post(
+        "/api/analyse", json={"sample_file": stored["file"], "name": "uploaded"}
+    ).json()
+    assert analysed["profile"]["id_column"] == "loan_id"
+    assert analysed["profile"]["time_column"] == "reporting_date"
+    assert client.post("/api/check", json=analysed["spec"]).json()["valid"]
+    # The wizard's next step binds to this, so it comes back with the analysis
+    # rather than needing a second round trip.
+    assert analysed["schema"]["primary_key"] == "loan_id"
+    assert analysed["source"]
+
+
+def test_a_schema_alone_is_enough_to_build_a_configuration(client):
+    """The schema is the only required upload, so it has to work on its own."""
+    header = b"contract_id,as_of_date,exposure,rating\n"
+    stored = _upload(client, "schema.csv", header, kind="schema")
+    assert stored["columns"] == ["contract_id", "as_of_date", "exposure", "rating"]
+
+    analysed = client.post("/api/analyse", json={"schema_file": stored["file"]}).json()
+    assert analysed["profile"] is None
+    assert client.post("/api/check", json=analysed["spec"]).json()["valid"]
+    # Nothing was measured, so every column says so rather than pretending.
+    assert len(analysed["needs_review"]) == 4
+
+
+def test_analysing_nothing_is_refused(client):
+    response = client.post("/api/analyse", json={})
+    assert response.status_code == 400
+    assert "upload a schema" in response.json()["detail"]
+
+
+def test_excel_and_json_uploads_are_accepted(client, tmp_path):
+    """All four advertised formats reach the profiler, not just the two native ones."""
+    frame = pd.read_csv(io.BytesIO(_tape_csv()))
+
+    excel = tmp_path / "tape.xlsx"
+    frame.to_excel(excel, index=False)
+    assert _upload(client, "tape.xlsx", excel.read_bytes())["columns"][0] == "loan_id"
+
+    body = frame.to_json(orient="records").encode()
+    assert "balance" in _upload(client, "tape.json", body)["columns"]
 
 
 def test_an_unsupported_extension_is_refused(client):
     response = client.post(
-        "/api/upload", files={"file": ("notes.txt", io.BytesIO(b"hello"), "text/plain")}
+        "/api/upload",
+        files={"file": ("notes.txt", io.BytesIO(b"hello"), "text/plain")},
+        data={"kind": "sample"},
     )
     assert response.status_code == 400
-    assert ".csv or .parquet" in response.json()["detail"]
+    assert "csv" in response.json()["detail"]
 
 
 def test_an_unreadable_file_is_refused_and_not_kept(client):
@@ -175,6 +220,120 @@ def test_an_unreadable_file_is_refused_and_not_kept(client):
     assert response.status_code == 400
     uploads = web.WORKSPACE / "uploads"
     assert not uploads.exists() or not list(uploads.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# schema review and configuration
+# ---------------------------------------------------------------------------
+
+
+def test_the_schema_review_reports_what_was_detected(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    review = client.post("/api/schema", json={"spec": spec}).json()
+
+    assert review["primary_key"] == "loan_id"
+    assert review["time_column"] == "reporting_date"
+    assert "reporting_date" in review["date_columns"]
+    assert review["counts"]["columns"] == len(spec["columns"])
+    assert {"name", "dtype", "role", "required", "primary_key"} <= set(review["columns"][0])
+
+
+def test_renaming_a_column_rewrites_every_reference_to_it(client):
+    """A rename that only touched the column definition would break the spec."""
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    result = client.post(
+        "/api/schema/edit",
+        json={"spec": spec, "edits": [{"original": "current_balance", "rename": "outstanding"}]},
+    ).json()
+
+    assert result["valid"], result["problems"]
+    edited = result["spec"]
+    assert edited["dynamics"]["amortisation"]["balance"] == "outstanding"
+    assert "outstanding" in edited["emit"]["column_order"]
+    assert "current_balance" not in json.dumps(edited)
+
+
+def test_marking_a_column_optional_lets_missing_values_reach_it(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    before = client.post(
+        "/api/configure", json={"spec": spec, "missing": 0.2, "from_base": False}
+    ).json()
+    assert before["optional_columns"] == []
+    assert any("every column is marked required" in n for n in before["notes"])
+
+    edited = client.post(
+        "/api/schema/edit",
+        json={"spec": spec, "edits": [{"original": "borrower_annual_income", "required": False}]},
+    ).json()["spec"]
+    after = client.post(
+        "/api/configure", json={"spec": edited, "missing": 0.2, "from_base": False}
+    ).json()
+    assert after["optional_columns"] == ["borrower_annual_income"]
+
+
+def test_configuring_rates_rewrites_the_matrix_and_says_so(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    result = client.post(
+        "/api/configure",
+        json={"spec": spec, "default_rate": 0.05, "recovery_rate": 0.4, "from_base": False},
+    ).json()
+
+    assert result["valid"], result["problems"]
+    assert abs(result["rates"]["default_rate"] - 0.05) < 0.005
+    assert result["rates"]["recovery_rate"] == 0.4
+    # Recovery has to be recorded somewhere for the number to mean anything.
+    assert result["spec"]["dynamics"]["recovery"]["target"] == "recovery_amount"
+    assert result["spec"]["lifecycle"]["transitions"] != spec["lifecycle"]["transitions"]
+
+
+def test_a_method_change_is_applied_to_the_spec_itself(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    result = client.post(
+        "/api/configure", json={"spec": spec, "method": "rule_based", "from_base": False}
+    ).json()
+
+    assert result["valid"], result["problems"]
+    assert result["spec"]["generation"]["method"] == "rule_based"
+    kinds = {c["generator"]["kind"] for c in result["spec"]["columns"] if c.get("generator")}
+    assert "scipy" not in kinds
+    assert any("rewritten as rule based" in n for n in result["notes"])
+
+
+def test_new_loans_can_be_switched_on_from_the_configure_form(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    result = client.post(
+        "/api/configure",
+        json={"spec": spec, "periods": 12, "origination_rate": 0.03, "from_base": False},
+    ).json()
+
+    assert result["valid"], result["problems"]
+    assert result["spec"]["originations"]["rate"] == 0.03
+    assert result["capabilities"]["origination_rate"] == 0.03
+    assert any("new loans arrive" in n.lower() for n in result["notes"])
+
+
+def test_an_open_pool_run_reports_what_arrived(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    spec["originations"] = {"rate": 0.05}
+    started = client.post("/api/run", json={"spec": spec, "num_records": 200, "periods": 4})
+    job = wait_for(client, started.json()["job"])
+
+    assert job["status"] == "done", job.get("error")
+    result = job["result"]
+    assert result["originated"] == 30, "10 per period across three later cut-offs"
+    assert result["total_entities"] == 230
+    assert result["validation"]["passed"]
+    assert result["mix"][0]["originated"] == 0
+
+
+def test_a_deep_method_without_a_sample_is_refused_before_the_run(client):
+    """The engine would raise minutes in; the UI should refuse in milliseconds."""
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    spec["generation"] = {"method": "ctgan"}
+    response = client.post("/api/run", json={"spec": spec, "num_records": 50})
+
+    assert response.status_code == 400
+    assert "learns from real data" in response.json()["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +387,118 @@ def test_progress_advances_and_names_a_stage(client):
     job = wait_for(client, started.json()["job"])
     assert job["progress"] == 1.0
     assert job["stage"]
+
+
+def test_progress_names_one_of_the_seven_stages(client):
+    """The progress view lists fixed stages, so the engine's must map onto them."""
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    started = client.post("/api/run", json={"spec": spec, "num_records": 200, "periods": 3})
+    assert [s["key"] for s in started.json()["stages"]] == [k for k, _ in web.STAGES]
+
+    job = wait_for(client, started.json()["job"])
+    assert job["step"] in {k for k, _ in web.STAGES}
+
+
+# ---------------------------------------------------------------------------
+# results: charts and the data table
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def finished(client):
+    """One completed run, reused by everything that inspects a result."""
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    started = client.post("/api/run", json={"spec": spec, "num_records": 300, "periods": 6})
+    job = wait_for(client, started.json()["job"])
+    assert job["status"] == "done", job.get("error")
+    return started.json()["job"], job["result"]
+
+
+def test_the_four_charts_come_back_aggregated(client, finished):
+    job_id, _ = finished
+    charts = client.get(f"/api/charts/{job_id}").json()
+
+    assert charts["unavailable"] == {}, "this pack supports every chart"
+    assert charts["pool_balance"]["column"] == "current_balance"
+    assert charts["pool_balance"]["factor"][0] == 1.0
+    # A pool that amortises ends smaller than it started.
+    assert charts["pool_balance"]["balance"][-1] < charts["pool_balance"]["balance"][0]
+    assert charts["delinquency"]["series"]
+    assert len(charts["ltv"]["edges"]) == 31
+    # No sample was uploaded, so there is nothing to compare against and the
+    # chart says so rather than inventing a second series.
+    assert charts["has_reference"] is False
+    assert charts["distribution"][0]["reference"] is None
+
+
+def test_the_data_table_searches_sorts_and_pages(client, finished):
+    job_id, _ = finished
+
+    first = client.get(f"/api/table/{job_id}", params={"limit": 5}).json()
+    assert len(first["rows"]) == 5
+    assert first["total"] > 5
+
+    sorted_desc = client.get(
+        f"/api/table/{job_id}", params={"limit": 5, "sort": "current_balance", "descending": True}
+    ).json()
+    balances = [row[sorted_desc["columns"].index("current_balance")] for row in sorted_desc["rows"]]
+    assert balances == sorted(balances, reverse=True)
+
+    found = client.get(f"/api/table/{job_id}", params={"search": "Performing"}).json()
+    assert 0 < found["total"] <= first["total"]
+
+    page_two = client.get(f"/api/table/{job_id}", params={"limit": 5, "offset": 5}).json()
+    assert page_two["rows"] != first["rows"]
+
+
+def test_charts_and_tables_refuse_a_run_that_has_not_finished(client):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    started = client.post("/api/run", json={"spec": spec, "num_records": 100, "periods": 2}).json()
+    # Whatever state it is in, asking for results of an unknown job is a 404 and
+    # of an unfinished one is a 409 — never a traceback.
+    assert client.get("/api/charts/deadbeef").status_code == 404
+    assert client.get(f"/api/charts/{started['job']}").status_code in (200, 409)
+    wait_for(client, started["job"])
+
+
+# ---------------------------------------------------------------------------
+# step 6: the five downloads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fmt,marker",
+    [
+        ("csv", b"loan_id,"),
+        ("parquet", b"PAR1"),
+        ("xlsx", b"PK"),
+        ("yaml", b"meta:"),
+        ("report", b"<!doctype html>"),
+    ],
+)
+def test_every_download_format_is_produced(client, finished, fmt, marker):
+    job_id, _ = finished
+    response = client.get(f"/api/export/{job_id}", params={"format": fmt})
+    assert response.status_code == 200, response.text
+    assert marker in response.content[:4096] or marker in response.content
+
+
+def test_the_validation_report_states_the_verdict_and_the_checks(client, finished):
+    job_id, _ = finished
+    html = client.get(f"/api/export/{job_id}", params={"format": "report"}).text
+
+    assert "PASSED" in html
+    assert "ids_unique_per_period" in html
+    # Self-contained: an emailed report with a broken CDN link is worthless.
+    assert "http://" not in html.replace("http://www.w3.org", "")
+    assert "<script" not in html
+
+
+def test_an_unknown_export_format_is_refused(client, finished):
+    job_id, _ = finished
+    response = client.get(f"/api/export/{job_id}", params={"format": "docx"})
+    assert response.status_code == 400
+    assert "unknown format" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -291,3 +562,14 @@ def test_explain_problems_passes_our_own_bullets_through():
 
 def test_explain_problems_never_returns_nothing():
     assert api.explain_problems(ValueError("")) == ["the spec could not be validated"]
+
+
+def test_static_assets_must_be_revalidated(client):
+    """A browser left to invent its own freshness lifetime will serve a stale
+    stylesheet for hours, and the page then silently disagrees with the code on
+    disk. `no-cache` means "ask me first", not "do not cache" — the ETag still
+    turns an unchanged file into a 304."""
+    for asset in ("/", "/styles.css", "/app.js"):
+        response = client.get(asset)
+        assert response.status_code == 200, asset
+        assert "no-cache" in response.headers.get("cache-control", ""), asset

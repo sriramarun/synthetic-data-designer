@@ -254,3 +254,105 @@ def test_seeding_recovers_missed_payments_from_days_past_due():
     acc = [Accrual(column="arrears", add="payment", when="not_performing")]
     counters = seed_accrual_counters(df, acc, "dpd")
     assert list(counters["arrears"]) == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# recovery
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_is_booked_once_on_the_way_into_a_write_off():
+    """A defaulted loan is not a total loss, but it is only recovered once.
+
+    Without the "entering" test an absorbing state would book a recovery every
+    period an entity sat in it, and a pool would recover several times what it
+    lost.
+    """
+    from sdd.age.panel import apply_recovery
+
+    spec = _recovery_spec(rate=0.4)
+    df = pd.DataFrame({"balance": [100_000.0, 200_000.0, 300_000.0]})
+
+    entering = apply_recovery(
+        spec,
+        df.copy(),
+        previous=np.array(["Defaulted", "Defaulted", "Performing"], dtype=object),
+        current=np.array(["Charged-Off", "Defaulted", "Performing"], dtype=object),
+    )
+    assert list(entering["recovery_amount"]) == [40_000.0, 0.0, 0.0]
+
+    # Already there last period: nothing more is recovered.
+    staying = apply_recovery(
+        spec,
+        df.copy(),
+        previous=np.array(["Charged-Off"] * 3, dtype=object),
+        current=np.array(["Charged-Off"] * 3, dtype=object),
+    )
+    assert list(staying["recovery_amount"]) == [0.0, 0.0, 0.0]
+
+
+def _recovery_spec(rate: float):
+    from sdd.spec import load_spec_dict
+
+    return load_spec_dict(
+        {
+            "meta": {"name": "rec"},
+            "entity": {
+                "id_column": "id",
+                "time_column": "asof",
+                "calendar": {"start": "2024-01-31", "periods": 3},
+            },
+            "columns": [
+                {"name": "id", "role": "static", "dtype": "str", "generator": {"kind": "sequence"}},
+                {
+                    "name": "asof",
+                    "role": "dynamic",
+                    "dtype": "str",
+                    "generator": {"kind": "constant", "value": "2024-01-31"},
+                },
+                {
+                    "name": "state",
+                    "role": "dynamic",
+                    "dtype": "category",
+                    "generator": {"kind": "constant", "value": "Performing"},
+                },
+                {
+                    "name": "balance",
+                    "role": "dynamic",
+                    "dtype": "float",
+                    "generator": {"kind": "uniform", "low": 1, "high": 2},
+                },
+                {
+                    "name": "recovery_amount",
+                    "role": "dynamic",
+                    "dtype": "float",
+                    "generator": {"kind": "constant", "value": 0.0},
+                },
+            ],
+            "lifecycle": {
+                "state_column": "state",
+                "states": ["Performing", "Defaulted", "Charged-Off"],
+                "transition_states": ["Performing", "Defaulted"],
+                "transitions": [[0.98, 0.02], [0.0, 1.0]],
+                "absorbing": ["Defaulted"],
+                "terminal": ["Charged-Off"],
+                "hazards": [
+                    {
+                        "kind": "dwell_time",
+                        "name": "writeoff",
+                        "from_state": "Defaulted",
+                        "to_state": "Charged-Off",
+                        "periods": 3,
+                    }
+                ],
+            },
+            "dynamics": {
+                "recovery": {
+                    "rate": rate,
+                    "balance": "balance",
+                    "target": "recovery_amount",
+                    "on_states": ["Charged-Off"],
+                }
+            },
+        }
+    )

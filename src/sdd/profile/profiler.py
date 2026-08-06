@@ -75,6 +75,7 @@ class ColumnProfile:
     domain: list[Any] | None = None
     fit: Fit | None = None
     note: str | None = None
+    resample: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def confidence(self) -> float:
@@ -99,6 +100,7 @@ class DatasetProfile:
     detection_notes: dict[str, str] = field(default_factory=dict)
     dynamics: dict[str, Any] = field(default_factory=dict)
     derived: list[Any] = field(default_factory=list)
+    correlation: dict[str, Any] | None = None
 
     def column(self, name: str) -> ColumnProfile | None:
         return next((c for c in self.columns if c.name == name), None)
@@ -117,6 +119,7 @@ class DatasetProfile:
             "time_column": self.time_column,
             "detection_notes": self.detection_notes,
             "dynamics": self.dynamics,
+            "correlation": self.correlation,
             "derived": [
                 {"target": d.target, "source": d.source, "confidence": d.confidence}
                 for d in self.derived
@@ -155,13 +158,74 @@ class DatasetProfile:
 # ---------------------------------------------------------------------------
 
 
+READABLE_SUFFIXES = (
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".parquet",
+    ".pq",
+    ".xlsx",
+    ".xlsm",
+    ".xls",
+    ".json",
+    ".jsonl",
+    ".ndjson",
+)
+
+
 def read_sample(path: str | Path, *, max_rows: int | None = None) -> pd.DataFrame:
-    """Load a CSV or parquet sample."""
+    """Load a sample tape from any of the four formats the UI accepts.
+
+    CSV and parquet are the working formats; Excel and JSON are accepted because
+    that is how a schema or a small extract usually arrives from a business team.
+    ``max_rows`` is honoured by the readers that support it and applied after the
+    fact by the ones that do not.
+    """
     path = Path(path)
-    if path.suffix.lower() in (".parquet", ".pq"):
+    suffix = path.suffix.lower()
+
+    if suffix in (".parquet", ".pq"):
         df = pd.read_parquet(path)
-        return df.head(max_rows) if max_rows else df
-    return pd.read_csv(path, nrows=max_rows, low_memory=False)
+    elif suffix in (".xlsx", ".xlsm", ".xls"):
+        df = pd.read_excel(path, nrows=max_rows)
+    elif suffix in (".jsonl", ".ndjson"):
+        df = pd.read_json(path, lines=True, nrows=max_rows)
+    elif suffix == ".json":
+        df = _read_json(path)
+    elif suffix in (".tsv",):
+        df = pd.read_csv(path, sep="\t", nrows=max_rows, low_memory=False)
+    else:
+        df = pd.read_csv(path, nrows=max_rows, low_memory=False)
+
+    return df.head(max_rows) if max_rows is not None and len(df) > max_rows else df
+
+
+def _read_json(path: Path) -> pd.DataFrame:
+    """Read a JSON tape, whichever of the three usual shapes it arrives in.
+
+    A list of row objects, an object wrapping one under a common key
+    (``data``/``rows``/``records``), or a column-oriented mapping. Anything else
+    is a schema document, not data, and is refused here rather than silently
+    profiled as one row of nested junk.
+    """
+    import json as _json
+
+    raw = _json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        for key in ("data", "rows", "records", "items"):
+            if isinstance(raw.get(key), list):
+                raw = raw[key]
+                break
+    if isinstance(raw, list):
+        if not raw:
+            raise ValueError(f"{path.name} holds an empty list; there is nothing to profile")
+        return pd.json_normalize(raw)
+    if isinstance(raw, dict) and all(isinstance(v, list) for v in raw.values()):
+        return pd.DataFrame(raw)
+    raise ValueError(
+        f"{path.name} is not tabular JSON — expected a list of row objects, or an object "
+        "wrapping one under 'data'/'rows'/'records'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +431,71 @@ def profile_column(
         profile.fit.note = "dates resampled from observed values; consider a calendar rule instead"
     else:
         profile.fit = fit_numeric(clean)
+        # Kept alongside the chosen fit so the "sampling" generation method has
+        # the observed shape to draw from without re-reading the tape.
+        profile.resample = _resample_generator(clean)
 
     return profile
+
+
+def _resample_generator(values: pd.Series) -> dict[str, Any] | None:
+    """A binned copy of the observed distribution, as a serialisable generator."""
+    from sdd.profile.distributions import _empirical
+
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty or numeric.nunique() < 2:
+        return None
+    try:
+        return _empirical(numeric).generator.model_dump(mode="json")
+    except Exception:
+        return None
+
+
+# Enough columns to carry the joint structure that matters, few enough that the
+# matrix stays readable in a spec and cheap to reimpose.
+MAX_CORRELATED_COLUMNS = 40
+
+# Below this, a pair is noise rather than structure, and reimposing it just adds
+# spurious detail to the output.
+MIN_ABS_CORRELATION = 0.05
+
+
+def measure_correlation(df: pd.DataFrame, columns: list[str]) -> dict[str, Any] | None:
+    """Spearman rank correlation between numeric columns.
+
+    Rank correlation rather than Pearson because that is what can be reimposed
+    on generated data by reordering: reordering preserves each column's own
+    distribution exactly, and only ranks carry across.
+    """
+    usable = [
+        c
+        for c in columns
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique() > 2
+    ][:MAX_CORRELATED_COLUMNS]
+    if len(usable) < 2:
+        return None
+
+    frame = df[usable].apply(pd.to_numeric, errors="coerce")
+    matrix = frame.corr(method="spearman", min_periods=20)
+    if matrix.isna().all().all():
+        return None
+    matrix = matrix.fillna(0.0)
+    np.fill_diagonal(matrix.values, 1.0)
+
+    # Drop columns that correlate with nothing: carrying them costs spec size and
+    # buys no structure.
+    off_diagonal = matrix.abs().sum(axis=1) - 1.0
+    keep = [c for c in usable if off_diagonal[c] >= MIN_ABS_CORRELATION]
+    if len(keep) < 2:
+        return None
+    matrix = matrix.loc[keep, keep]
+
+    return {
+        "columns": keep,
+        "matrix": [[round(float(v), 4) for v in row] for row in matrix.to_numpy()],
+        "method": "spearman",
+        "rows": len(frame),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +518,11 @@ def profile_dataset(
     it wrong, which is why both report the reason they chose what they did.
     """
     df = data if isinstance(data, pd.DataFrame) else read_sample(data, max_rows=max_rows)
+    # Applied again for an in-memory frame, which no reader trimmed. Without
+    # this the cap silently means nothing when the caller passes a DataFrame,
+    # and "profile the first 200k rows" quietly profiles all five million.
+    if max_rows is not None and len(df) > max_rows:
+        df = df.head(max_rows)
     if df.empty:
         raise ValueError("the sample is empty; nothing to profile")
 
@@ -425,6 +557,14 @@ def profile_dataset(
         entities=entities,
         is_panel=is_panel,
         detection_notes=notes,
+    )
+
+    # Measured on the first cut-off for the same reason generators are: what the
+    # opening book needs is how columns moved together on day one, not how the
+    # survivors looked pooled across two years.
+    profile.correlation = measure_correlation(
+        first_period if first_period is not None and not first_period.empty else df,
+        [c.name for c in columns if c.dtype in ("int", "float") and c.role != "constant"],
     )
 
     if is_panel and learn_dynamics:

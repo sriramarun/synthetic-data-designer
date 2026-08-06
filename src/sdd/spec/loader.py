@@ -193,6 +193,19 @@ def _check_references(spec: DesignSpec) -> list[str]:
     for name in spec.validation.non_negative_columns:
         require(name, "validation.non_negative_columns")
 
+    # Two rules writing the same column each period is not a merge, it is a
+    # silent override: the ageing loop applies counters before amortisation, so
+    # amortisation wins and the counter's declared step becomes a lie the
+    # validator then reports against the engine's own output.
+    if dyn.amortisation:
+        clashing = [c.column for c in dyn.counters if c.column == dyn.amortisation.balance]
+        if clashing:
+            problems.append(
+                f"dynamics.counters steps {clashing[0]!r}, but dynamics.amortisation already "
+                "moves that column every period. Remove the counter, or point the amortisation "
+                "at a different balance column"
+            )
+
     return problems
 
 
@@ -254,10 +267,16 @@ def _check_derivation_order(spec: DesignSpec) -> list[str]:
                 "they are available — move it after the derivation that produces them, "
                 "or set stage: period if it should run during ageing"
             )
-        if d.target in refs and d.stage == "book":
+        # Reading your own target is a cycle only when nothing has given it a
+        # value yet. Where the target is already available — a sampled column, or
+        # one an earlier derivation produced — `x = x + 1` is an ordinary
+        # rewrite, and it is how a stress scenario shifts a rate column that was
+        # sampled a moment earlier.
+        if d.target in refs and d.stage == "book" and d.target not in available:
             problems.append(
-                f"derivation {d.target!r} is defined in terms of itself; that only works "
-                "for per-period updates (use `dynamics.counters` or stage: period)"
+                f"derivation {d.target!r} is defined in terms of itself and nothing else "
+                "gives it a value; that only works for per-period updates (use "
+                "`dynamics.counters` or stage: period)"
             )
         available.add(d.target)
 

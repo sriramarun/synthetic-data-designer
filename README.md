@@ -19,14 +19,16 @@ that spec for you by reading your data.
 ## The idea in one picture
 
 ```
-  structure                          ┌─> profile.json   what the data looks like
-  (ESMA taxonomy / CSV header) ──┐   │
-                                 ├───┤
-  sample data                    │   └─> spec.yaml      editable knobs
-  (a real or reference tape) ────┘            │
+  schema                            ┌──> profile.json   what the data looks like
+  (taxonomy / header / dictionary)  │
+  CSV · Parquet · Excel · JSON  ────┤
+                                    │
+  sample data                       └──> spec.yaml      every editable knob
+  (a real or reference tape)  ──────┘         │
                                               │
         requirements ──────────────────┐      │
-        (rows, periods, scenario)      ▼      ▼
+        (rows, periods, method,        │      │
+         rates, randomness)            ▼      ▼
                                ┌──────────────────────┐
                                │   generate  +  age   │
                                └──────────┬───────────┘
@@ -34,6 +36,7 @@ that spec for you by reading your data.
                       per-period tapes  +  panel.parquet
                       +  invariant report  +  fidelity report
                       +  run manifest (hash, seed, versions)
+                      +  CSV / Parquet / Excel / YAML / HTML report
 ```
 
 ---
@@ -48,16 +51,59 @@ pip install -e '.[dev,web]'
 sdd ui
 ```
 
-A local page at `http://127.0.0.1:8000` walks the whole flow — drop in a tape, read
-what the analysis found, adjust the knobs, generate, inspect. Nothing leaves the
-machine. Screens: **Source** (upload or pick a pack) → **Analysis** (what was
-inferred, and how confident) → **Configure** (scale, periods, scenario,
-amortisation, the transition matrix as an editable grid with live row sums, and
-per-column distribution parameters, plus raw YAML as an escape hatch) →
-**Results** (invariant report, pool-over-time chart, downloads).
+A local page at `http://127.0.0.1:8000` walks the whole flow, in six steps. Nothing
+leaves the machine — files are read, profiled and deleted with the workspace.
+
+```
+Upload → Review → Configure → Generate → Results → Download
+```
+
+**1. Upload.** A schema (CSV, Parquet, Excel or JSON — a header, a parquet schema, a
+data dictionary, or an ESMA taxonomy) and, optionally, sample data. Either alone is
+enough: a schema fixes the columns, a sample measures the distributions, and
+together the schema wins on structure while the sample wins on shape. Or load a
+bundled pack and skip ahead.
+
+**2. Review schema.** Every column with its detected type, role, primary key, date
+columns, nullability and the confidence behind each inference. Names, types and
+required/optional are editable here. A rename travels: the entity, the emit order,
+the lifecycle, the dynamics and every expression referring to it are rewritten too.
+
+**3. Configure.** Six tabs, all editing one document:
+
+| Tab | What it holds |
+|---|---|
+| Scale | rows, seed, stress scenario |
+| Generation method | statistical · distribution based · rule based · sampling · CTGAN · hybrid |
+| Randomness | noise, correlation, outliers, missing values |
+| Data aging | periods, monthly/quarterly/annual, default rate, prepayment rate, recovery rate, new loans per period, and the transition matrix as a live grid |
+| Schema | per-column distribution parameters |
+| Advanced | the YAML itself, which updates as you change anything above |
+
+**New loans.** Left at zero, the pool is closed: every loan exists at the first
+cut-off and the pool only shrinks. Above zero it stays open, so a run starting in
+December 2024 and ageing 24 months holds loans written across 2025 and 2026 as
+well as the opening book. They are drawn from the same distributions, dated to the
+cut-off they arrive at, and aged from there.
+
+**4. Generate.** Seven named stages, a progress bar and an estimated finish. The run
+happens on a worker thread, so nothing depends on the browser staying open.
+
+**5. Results.** Rows, columns, time taken, validation verdict; distribution
+comparison against the sample, delinquency curve, LTV distribution and pool balance
+over time; and the generated data in a table you can search, sort and page. All four
+charts and the table are computed server-side against the file, so a
+twelve-million-row panel behaves like a twelve-thousand-row one.
+
+**6. Download.** CSV, Parquet, Excel, the configuration as YAML, and a standalone
+validation report.
 
 Every edit is validated by the same loader the CLI uses, so the UI cannot accept a
-spec the engine would reject.
+spec the engine would reject — and every control writes into the configuration, so
+whatever the forms do, the YAML tab shows.
+
+**[→ The user guide](docs/USER-GUIDE.md)** walks every screen and every setting,
+including the ones only the YAML exposes.
 
 Or drive it from the command line:
 
@@ -98,9 +144,38 @@ sdd run rmbs_nl_green_lion -n 50000 -o ./severe --scenario severe
 
 ---
 
+## The calibrated packs
+
+Two ship, deliberately unlike each other — a second pack is only worth having if
+it exercises the engine differently.
+
+| | `rmbs_nl_green_lion` | `auto_abs_esma_annex5` |
+|---|---|---|
+| **Shown as** | Dutch Green Loans — Residential Mortgages | European Auto Loans — ESMA Annex 5 |
+| Template | ESMA Annex 2, residential real estate | ESMA Annex 5, automobile |
+| Columns | 71 | 44 |
+| Collateral | a house, **indexed upward** | a car, **depreciating** at 15%/yr |
+| Term | 360 months — a 24-cut-off panel barely dents it | 24-72 months, so contracts mature inside the panel |
+| Product shapes | interest-only vs annuity | hire purchase, PCP with a balloon, lease, loan |
+| Default → write-off | 9 months | 6 months, then **recovery** at 45% of balance |
+| Calibrated to | upstream deeploans' Dutch RMBS deal | published European prime auto ABS ranges |
+
+```bash
+sdd run auto_abs_esma_annex5 -n 20000 -o ./auto --scenario severe
+```
+
+On the ESMA side, be precise about what you are getting: the column names follow
+the Annex 5 field vocabulary and the section ordering of the disclosure template,
+and the format hints map onto the types. That is the **shape** a filing takes, and
+it is not a filing — check the field codes and the full field list against the
+official ESMA XML schema before submitting anything derived from it. What the pack
+gives you is realistic test data in the right structure.
+
+---
+
 ## Vocabulary
 
-If you don't work in securitisation daily, these five terms carry the whole design:
+If you don't work in securitisation daily, these six terms carry the whole design:
 
 | Term | Plain meaning |
 |---|---|
@@ -109,6 +184,7 @@ If you don't work in securitisation daily, these five terms carry the whole desi
 | **Ageing** | Walking each loan forward: it pays down, falls behind, prepays, defaults. |
 | **Transition matrix** | A table of "if a loan is Performing this month, what's the chance it's 30 days late next month?" One row per state, each row summing to 1. |
 | **Hazard** | A per-period chance of an event — e.g. 0.6%/month of paying off early. |
+| **Closed vs open pool** | A closed pool holds every loan at the first cut-off and only shrinks. An open one keeps lending, so loans written during the window appear at the cut-off they were written on. |
 
 ---
 
@@ -155,26 +231,39 @@ Pointed at a panel it has never seen, with no pack:
 | counters | columns moving by a fixed step each period |
 | index drift | geometric mean growth of valuation columns |
 | bucket columns | recovered as derivations, verified by re-deriving every label |
+| correlation | Spearman rank correlation between numeric columns, reimposed by reordering |
+| open vs closed pool | entities first seen after the opening cut-off, as a rate; and whether they arrived newly written or acquired seasoned, read off their own counters |
 
 On the RMBS round trip it recovers the state ordering, both terminal states, the
 absorbing state, annuity-only-when-performing, all four counters, six bucket columns,
 and a transition matrix within 0.005 of the hand-set one. The regenerated panel
 passes 39/39 of its own invariants.
 
-### What it does not recover
+### How columns are made to move together
 
-**Relationships between columns.** Marginal profiling fits each column
-independently, so a loan-to-value sampled beside a balance and a valuation will not
-equal their ratio. Measured on the round trip: marginals come back within a couple of
-percentage points, the largest pairwise correlation is off by ~1.0.
+Fitting each column on its own produces a book where every column is individually
+right and jointly wrong: a loan-to-value sampled beside a balance and a valuation
+does not equal their ratio, and nothing ties income to loan size. Three mechanisms
+close that gap, in increasing cost:
 
-Three ways to close that gap, in increasing cost:
+1. **Derivations.** Write the relationship into the spec and it holds exactly, every
+   period. Cheap, auditable, and how every ratio and band in the RMBS pack works.
+   Bucket columns are recovered as derivations automatically.
+2. **Rank correlation.** The profiler measures the Spearman correlation between
+   numeric columns and stores it in the spec; the randomness stage reorders the
+   generated values to match it. Reordering cannot change a column's own
+   distribution, so the fitted marginals survive untouched while the joint structure
+   appears. The **Correlation** control scales it continuously, 0 to 1. On the RMBS
+   round trip this takes the largest pairwise correlation error from **~1.0 to
+   0.08**.
+3. **A deep model.** The optional CTGAN/TVAE polish (`pip install 'sdd[deep]'`)
+   learns the joint distribution from a real seed dataset. Slow, needs the real
+   tape, and not auditable — so the fidelity report shows before and after, and the
+   step has to earn its keep.
 
-1. Write the relationship as a `derivation` in the spec. Cheap, exact, auditable.
-2. Let the profiler recover it — bucket columns already are; ratios are not yet.
-3. Turn on the optional CTGAN/TVAE polish (`pip install 'sdd[deep]'`) against a
-   real seed dataset. The fidelity report shows before and after, so the step has
-   to earn its keep.
+Rank correlation is monotonic by construction: it reproduces "bigger loans go with
+bigger incomes", not a curved or conditional relationship. Those still need a
+derivation or the deep model.
 
 ---
 
@@ -240,11 +329,12 @@ pip install -e '.[dev]'
 ```
 
 Core dependencies are light: numpy, pandas, pyarrow, scipy, pydantic, pyyaml,
-duckdb, typer. Two optional extras, neither required:
+duckdb, typer, openpyxl. Three optional extras:
 
 ```bash
+pip install -e '.[web]'    # the six-step web UI
 pip install -e '.[nemo]'   # sample via NVIDIA NeMo Data Designer instead of numpy
-pip install -e '.[deep]'   # CTGAN/TVAE polish on top of the rule-based sample
+pip install -e '.[deep]'   # CTGAN/TVAE polish, and the CTGAN/hybrid methods in the UI
 ```
 
 ---
@@ -278,15 +368,24 @@ That is the seam a web UI plugs into — the CLI is simply its first consumer.
 | **M4** profiler: sample data → spec | done |
 | **M5** optional NeMo and CTGAN backends | done |
 | **M6** JSON API façade + CLI | done |
-| **UI** local web app (upload, edit, run, inspect) | done |
+| **M7** six-step web UI: upload → review → configure → generate → results → download | done |
+| **M8** open pools: new loans written during the ageing window | done |
 
-284 tests. `pytest` green and `ruff` clean on every commit.
+416 tests. `pytest` green and `ruff` clean on every commit.
 
 Honest scope notes:
 
-- One calibrated pack ships (Dutch RMBS). Auto, CRE, SME and consumer packs are not
-  written yet, though the engine runs them — `tests/test_cross_asset_class.py`
-  exercises a quarterly depreciating auto lease end to end.
+- Two calibrated packs ship: Dutch residential mortgages and European auto loans.
+  CRE, SME and consumer packs are not written yet, though the engine runs them —
+  `tests/test_cross_asset_class.py` exercises a quarterly depreciating auto lease
+  end to end.
+- The auto pack is calibrated to *published ranges* for the asset class, not to any
+  one deal's tape. Its ESMA alignment is structural — field vocabulary, section
+  order, format hints — and is not a substitute for validating against the official
+  schema before a filing.
+- The UI has no login, no projects and no stored history: one wizard, from upload to
+  download, with the workspace on disk beside it. Accounts, saved projects and
+  version history layer on top of this flow without changing it.
 - The optional NeMo and CTGAN paths are implemented and their failure modes tested,
   but neither extra is installed in CI, so they are not exercised against a live
   backend here.

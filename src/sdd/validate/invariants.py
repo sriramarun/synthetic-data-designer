@@ -133,7 +133,14 @@ def validate_panel(
         if toggles.ids_unique_per_period:
             checks.append(_check_ids_unique(spec, con))
         if toggles.closed_pool:
-            checks.append(_check_closed_pool(spec, con))
+            # An open pool cannot satisfy the closed-pool check — new entities
+            # arriving is the point of it — so the same toggle buys the two
+            # checks that *are* meaningful there instead.
+            if spec.originations is None:
+                checks.append(_check_closed_pool(spec, con))
+            else:
+                checks.append(_check_spans_contiguous(spec, con))
+                checks.append(_check_origination_window(spec, con))
         if toggles.static_columns_stable:
             checks += _check_static_stability(spec, con, available)
         if toggles.terminal_states_absorb and spec.lifecycle:
@@ -192,6 +199,65 @@ def _check_closed_pool(spec: DesignSpec, con) -> CheckResult:
         "No entity appears that was not in the first cut-off.",
         f"SELECT DISTINCT {eid} FROM panel WHERE {eid} NOT IN ("
         f"  SELECT {eid} FROM panel WHERE {etime} = (SELECT MIN({etime}) FROM panel))",
+    )
+
+
+def _cutoff_index_cte(spec: DesignSpec) -> str:
+    """Number the cut-offs 0, 1, 2… so periods can be compared arithmetically.
+
+    The time column holds dates, not indices, and the calendar's step can be
+    monthly or quarterly. Ranking the distinct values that actually occur avoids
+    having to reconstruct the calendar in SQL.
+    """
+    etime = _ident(spec.entity.time_column)
+    return (
+        f"cutoffs AS (SELECT DISTINCT {etime} AS cutoff FROM panel), "
+        "indexed AS (SELECT cutoff, ROW_NUMBER() OVER (ORDER BY cutoff) - 1 AS idx FROM cutoffs)"
+    )
+
+
+def _check_spans_contiguous(spec: DesignSpec, con) -> CheckResult:
+    """An entity is reported at every cut-off between its first and its last.
+
+    The open-pool counterpart to ``closed_pool``. New entities may appear, but an
+    entity that vanishes for a period and comes back is a corrupted panel, and so
+    is one written twice — both show up as a row count that does not match the
+    span it covers.
+    """
+    eid, etime = _ident(spec.entity.id_column), _ident(spec.entity.time_column)
+    return _run(
+        con,
+        "entity_spans_contiguous",
+        "Every entity is reported at each cut-off from its first to its last, with no gaps.",
+        f"WITH {_cutoff_index_cte(spec)}, "
+        f"spans AS (SELECT p.{eid} AS entity_id, MIN(i.idx) AS first_seen, MAX(i.idx) AS last_seen,"
+        f"          COUNT(*) AS rows_written"
+        f"          FROM panel p JOIN indexed i ON p.{etime} = i.cutoff GROUP BY 1) "
+        "SELECT entity_id, first_seen, last_seen, rows_written FROM spans "
+        "WHERE rows_written <> last_seen - first_seen + 1",
+    )
+
+
+def _check_origination_window(spec: DesignSpec, con) -> CheckResult:
+    """Entities join the pool only when the spec says they may.
+
+    Either at the opening cut-off, or inside the origination window. An entity
+    appearing outside it means the ageing loop created one the configuration did
+    not ask for.
+    """
+    plan = spec.originations
+    assert plan is not None
+    eid, etime = _ident(spec.entity.id_column), _ident(spec.entity.time_column)
+    last = plan.end_period if plan.end_period is not None else spec.entity.calendar.periods
+    return _run(
+        con,
+        "origination_window",
+        f"Entities join at the opening cut-off, or between periods {plan.start_period} and {last}.",
+        f"WITH {_cutoff_index_cte(spec)}, "
+        f"joined AS (SELECT p.{eid} AS entity_id, MIN(i.idx) AS joined_at"
+        f"           FROM panel p JOIN indexed i ON p.{etime} = i.cutoff GROUP BY 1) "
+        "SELECT entity_id, joined_at FROM joined "
+        f"WHERE joined_at <> 0 AND (joined_at < {int(plan.start_period)} OR joined_at > {int(last)})",
     )
 
 
