@@ -49,8 +49,20 @@ NOTE
     exit 1
 fi
 
+# `hf auth login` stores a token for the Python client. It does not teach git
+# about it, so a plain clone URL prompts for a username git cannot ask for and
+# the push dies with "could not read Username". Carry the token in the remote
+# instead. The staging directory is a mktemp that the EXIT trap removes, so the
+# token never outlives this run — nothing is written to the keychain, and the
+# project repo's own remotes are untouched.
+TOKEN="$(hf auth token 2>/dev/null || true)"
+if [[ -z "$TOKEN" ]]; then
+    echo "No token from 'hf auth token'. Run: hf auth login" >&2
+    exit 1
+fi
+
 echo "==> Cloning https://huggingface.co/spaces/$SPACE"
-git clone "https://huggingface.co/spaces/$SPACE" "$STAGING/space"
+git clone "https://user:${TOKEN}@huggingface.co/spaces/$SPACE" "$STAGING/space"
 cd "$STAGING/space"
 
 echo "==> Assembling"
