@@ -394,6 +394,26 @@ def test_a_run_rejects_invalid_numeric_inputs(client, field, value, message):
     assert response.json()["detail"] == message
 
 
+@pytest.mark.parametrize("field", ["num_records", "periods", "seed"])
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN"])
+def test_a_run_rejects_the_non_finite_json_literals(client, field, literal):
+    """`Infinity` and `NaN` are not JSON, and `json.loads` accepts them anyway.
+
+    They have to be posted as raw text because no JSON encoder will emit them.
+    `int(nan)` raises ValueError and `int(inf)` raises OverflowError — an
+    ArithmeticError, which slips past a `(TypeError, ValueError)` clause. So the
+    two arrive together and only one of them used to be caught; the other was a
+    500 from a public endpoint.
+    """
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    body = json.dumps({"spec": spec})[:-1] + f', "{field}": {literal}}}'
+
+    response = client.post("/api/run", content=body, headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 400, f"{field}={literal} should not be a 500"
+    assert response.json()["detail"] == f"{field} must be an integer"
+
+
 def test_polling_an_unknown_job_is_a_404(client):
     assert client.get("/api/run/deadbeef").status_code == 404
 
@@ -602,7 +622,12 @@ def test_a_local_instance_claims_nothing_and_limits_nothing(client):
     on saying nothing leaves this machine."""
     meta = client.get("/api/meta").json()
     assert meta["shared"] is False
-    assert meta["limits"] == {"records": None, "periods": None, "upload_mb": None}
+    assert meta["limits"] == {
+        "records": None,
+        "periods": None,
+        "rows": None,
+        "upload_mb": None,
+    }
 
 
 def test_a_shared_instance_says_so(client, monkeypatch):
@@ -616,16 +641,66 @@ def test_a_shared_instance_says_so(client, monkeypatch):
     assert meta["limits"]["records"] == 50_000
 
 
-def test_a_run_over_the_row_ceiling_is_refused(client, monkeypatch):
+def test_a_run_over_the_entity_ceiling_is_refused(client, monkeypatch):
     monkeypatch.setattr(web, "MAX_RECORDS", 1_000)
     spec = client.get(f"/api/packs/{PACK}").json()["spec"]
 
     response = client.post("/api/run", json={"spec": spec, "num_records": 5_000, "periods": 2})
     assert response.status_code == 400
     problems = response.json()["problems"]
-    assert "up to 1,000 rows" in problems[0]
+    # Entities, said as entities. This message called them rows until a run of
+    # 3,000 produced 33,788 of them.
+    assert "up to 1,000 entities" in problems[0]
     # It says where to go for more, rather than only saying no.
     assert "locally" in problems[0]
+
+
+def test_the_row_ceiling_does_not_refuse_on_arithmetic(client, monkeypatch):
+    """`entities x periods` must not be used to reject a run up front.
+
+    Entities that reach a terminal state stop producing rows, so that product
+    over-states a closed pool rather than under-stating it — 50,000 entities
+    over 60 periods is 2,033,298 rows, not 3,000,000. Refusing on it turns
+    runs away that would have fitted, and the person asking has no way to
+    argue: they cannot know the survival curve. The loop counts instead.
+    """
+    monkeypatch.setattr(web, "MAX_RECORDS", 10_000)
+    monkeypatch.setattr(web, "MAX_ROWS", 50_000)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+
+    # 500 x 24 = 12,000 by arithmetic, under the ceiling either way, and the
+    # point is that the front door does no arithmetic at all.
+    response = client.post("/api/run", json={"spec": spec, "num_records": 500, "periods": 24})
+    assert response.status_code == 200
+
+    job = wait_for(client, response.json()["job"])
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["total_rows"] <= 500 * 24, (
+        "the product is an upper bound for a closed pool, which is why it "
+        "cannot be used as a lower one"
+    )
+
+
+def test_the_row_ceiling_holds_when_originations_hide_the_size(client, monkeypatch):
+    """The request that arithmetic on the payload cannot catch.
+
+    100 entities over 12 periods is 1,200 rows by the front door. Doubling the
+    pool every period is not, and the ceiling inside the ageing loop is the only
+    thing standing between that spec and the machine.
+    """
+    monkeypatch.setattr(web, "MAX_RECORDS", 10_000)
+    monkeypatch.setattr(web, "MAX_ROWS", 5_000)
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    spec["originations"] = {"rate": 1.0, "fresh": True}
+
+    started = client.post("/api/run", json={"spec": spec, "num_records": 100, "periods": 12})
+    assert started.status_code == 200, "it passes the pre-check, as expected"
+
+    job = wait_for(client, started.json()["job"])
+    assert job["status"] == "error"
+    assert "5,000-row ceiling" in job["error"]
+    # A limit that stops the run but leaves its output behind is half a limit.
+    assert not (web._workspace() / "runs" / started.json()["job"]).exists()
 
 
 def test_a_run_over_the_period_ceiling_is_refused(client, monkeypatch):

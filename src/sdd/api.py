@@ -717,6 +717,7 @@ def run(
     sample: str | Path | pd.DataFrame | None = None,
     validate_output: bool = True,
     progress: ProgressFn | None = None,
+    max_rows: int | None = None,
 ) -> dict[str, Any]:
     """Generate and age in one call — the normal path.
 
@@ -724,6 +725,10 @@ def run(
     overrides the calendar, which is how a UI offers "how many months?" without
     editing the spec. ``sample`` is the real tape, needed only by the deep
     generation methods.
+
+    ``max_rows`` caps the panel. It is for a shared deployment and is None
+    everywhere else — a person generating on their own machine is not told what
+    they may ask for.
     """
     from sdd.age.panel import run_ageing
     from sdd.generate import build_book
@@ -781,7 +786,15 @@ def run(
             progress(f"ageing: {stage}", 0.35 + fraction * 0.6)
 
     aged_at = time.time()
-    result = run_ageing(loaded, book, out_path, seed=seed, scenario=chosen, progress=age_progress)
+    result = run_ageing(
+        loaded,
+        book,
+        out_path,
+        seed=seed,
+        scenario=chosen,
+        progress=age_progress,
+        max_rows=max_rows,
+    )
     age_seconds = time.time() - aged_at
 
     report = None
@@ -806,6 +819,7 @@ def run(
         "surviving_entities": result["final_rows"],
         "originated": result.get("originated", 0),
         "total_entities": num_records + result.get("originated", 0),
+        "total_rows": result.get("total_rows"),
         "files": result["files"],
         "panel": result["panel"],
         "mix": result["mix"],

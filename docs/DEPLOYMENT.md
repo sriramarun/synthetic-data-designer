@@ -136,6 +136,7 @@ get the local behaviour the tool has always had.
 | `SDD_SHARED` | unset | Marks the instance as shared. Swaps the privacy copy for a notice |
 | `SDD_MAX_RECORDS` | unset | Largest run, in entities. Over it, the run is refused with a readable message that points at the local install |
 | `SDD_MAX_PERIODS` | unset | Longest run, in cut-offs |
+| `SDD_MAX_ROWS` | unset | Largest run, in **output rows**. The one that bounds the machine — see below |
 | `SDD_MAX_UPLOAD_MB` | unset | Largest upload. Checked *as the file streams*, so a declared size cannot lie |
 
 The Space image sets:
@@ -145,14 +146,50 @@ SDD_SHARED=1
 SDD_WORKSPACE=/home/user/workspace
 SDD_MAX_RECORDS=50000
 SDD_MAX_PERIODS=60
+SDD_MAX_ROWS=2500000
 SDD_MAX_UPLOAD_MB=50
 ```
 
 To try shared mode locally before deploying:
 
 ```bash
-SDD_SHARED=1 SDD_MAX_RECORDS=5000 SDD_MAX_UPLOAD_MB=5 sdd ui
+SDD_SHARED=1 SDD_MAX_RECORDS=5000 SDD_MAX_ROWS=100000 SDD_MAX_UPLOAD_MB=5 sdd ui
 ```
+
+### Set `SDD_MAX_ROWS`, not just `SDD_MAX_RECORDS`
+
+An entity is a loan. A **row** is one loan at one cut-off. Age 3,000 loans over
+12 months and you get roughly 34,000 rows — so a cap on entities is a cap on
+rows only if you remember to multiply, and it is not even that once
+`originations` are in play.
+
+`originations` is the open-pool setting: new loans join the book as it ages.
+Give it a `rate` and the pool compounds. Measured on this codebase, 1,000
+entities aged 30 periods at `originations.rate: 1.0` produce **413,938 rows**,
+896 MB of memory and 156 MB on disk — from a request that reads as a thousand
+loans. And the spec is posted by the browser, so a visitor can set that field.
+
+So `SDD_MAX_RECORDS` bounds nothing on its own.
+
+`SDD_MAX_ROWS` is checked **during the run**, per period, against the running
+row count — and nowhere else. There is no pre-check, on purpose.
+
+The tempting one is `entities × periods > SDD_MAX_ROWS`, and it is wrong in the
+direction that costs you users. Entities that reach a terminal state are dropped
+and stop producing rows, so the product *over*-states a closed pool: 50,000
+entities over 60 periods is 2,033,298 rows, not 3,000,000. Refuse on it and you
+turn away runs that would have fitted, with a message the person cannot argue
+with, because they cannot know the survival curve in advance. Originations break
+the bound the other way. It is not reliable in either direction.
+
+Counting the actual rows is. The loop stops at the period that crosses the line,
+so the work wasted by not rejecting early is bounded by the ceiling itself.
+
+When a run trips the ceiling it stops at that period, deletes its partial output,
+and reports how far it got. It never materialises the panel.
+
+Set it to what the box can hold. On 16 GB, 2.5M rows peaks around 2.2 GB, and
+the run pool is two workers, so budget for two.
 
 ---
 

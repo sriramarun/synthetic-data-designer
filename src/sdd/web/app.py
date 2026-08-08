@@ -31,6 +31,7 @@ Four design choices worth stating:
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sdd import __version__, api
+from sdd.age.panel import RowLimitExceeded
 
 STATIC = Path(__file__).parent / "static"
 
@@ -73,6 +75,16 @@ def _limit(name: str) -> int | None:
 MAX_RECORDS = _limit("SDD_MAX_RECORDS")
 MAX_PERIODS = _limit("SDD_MAX_PERIODS")
 MAX_UPLOAD_BYTES = (_limit("SDD_MAX_UPLOAD_MB") or 0) * 1024 * 1024 or None
+
+# The ceiling that actually bounds the machine.
+#
+# MAX_RECORDS counts *entities*, and a panel row is one entity at one cut-off,
+# so the two are separated by the number of periods — and by originations, which
+# add entities as the pool ages and are set in the spec the browser posts. So
+# entities alone bound nothing: measured here, 1,000 entities aged 30 periods
+# with `originations.rate: 1.0` produced 413,938 rows. This is enforced inside
+# the ageing loop, per period, against the row count itself.
+MAX_ROWS = _limit("SDD_MAX_ROWS")
 
 # Whether this instance is shared with people who cannot see the filesystem.
 #
@@ -134,6 +146,7 @@ def meta() -> dict[str, Any]:
         "limits": {
             "records": MAX_RECORDS,
             "periods": MAX_PERIODS,
+            "rows": MAX_ROWS,
             "upload_mb": (MAX_UPLOAD_BYTES // (1024 * 1024)) if MAX_UPLOAD_BYTES else None,
         },
     }
@@ -649,7 +662,13 @@ def _integer(payload: dict[str, Any], name: str, *, default: int) -> int:
         raise ValueError(f"{name} must be an integer")
     try:
         parsed = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # OverflowError, not only ValueError: `int(nan)` raises ValueError but
+        # `int(inf)` raises OverflowError, which is an ArithmeticError and walks
+        # straight past a `(TypeError, ValueError)` clause. Infinity reaches here
+        # because `json.loads` accepts the non-standard `Infinity` and `NaN`
+        # literals by default, so a browser can post either. The two look like
+        # one case and are not.
         raise ValueError(f"{name} must be an integer") from exc
     if isinstance(value, float) and not value.is_integer():
         raise ValueError(f"{name} must be an integer")
@@ -679,13 +698,27 @@ def _over_the_ceiling(records: int, periods: int) -> list[str]:
     problems = []
     if MAX_RECORDS is not None and records > MAX_RECORDS:
         problems.append(
-            f"This instance generates up to {MAX_RECORDS:,} rows at a time, and this run asks "
-            f"for {records:,}. Run it locally for more — `pip install sdd` and `sdd ui`."
+            f"This instance generates up to {MAX_RECORDS:,} entities at a time, and this run "
+            f"asks for {records:,}. Run it locally for more — `pip install sdd` and `sdd ui`."
         )
     if MAX_PERIODS is not None and periods > MAX_PERIODS:
         problems.append(
             f"This instance ages up to {MAX_PERIODS} periods, and this run asks for {periods}."
         )
+    # MAX_ROWS is deliberately not checked here.
+    #
+    # The obvious pre-check is `records * periods > MAX_ROWS`, and it is wrong in
+    # the direction that matters. Entities reaching a terminal state stop
+    # producing rows, so that product is an *upper* bound on a closed pool, not a
+    # lower one: measured, 50,000 entities over 60 periods yields 2,033,298 rows,
+    # not 3,000,000. A pre-check on it refuses runs that would have fitted, and
+    # the refusal is unanswerable — the person asking cannot know the survival
+    # curve. Originations break the bound the other way, so it is not reliable in
+    # either direction.
+    #
+    # The ageing loop counts rows as it writes them and stops at the period that
+    # crosses the line, so the work wasted by not rejecting early is bounded by
+    # the ceiling itself. A late but correct limit beats an early wrong one.
     return problems
 
 
@@ -728,6 +761,7 @@ def _execute(
             sample=sample_path,
             validate_output=True,
             progress=progress,
+            max_rows=MAX_ROWS,
         )
         # Hand the browser workspace-relative names, never absolute paths.
         root = _workspace().resolve()
@@ -744,6 +778,13 @@ def _execute(
                 eta_seconds=0,
                 result=result,
             )
+    except RowLimitExceeded as exc:
+        # The periods written before the ceiling was hit are of no use to anyone
+        # and would sit in a shared workspace until the instance restarts. A
+        # limit that stops the run but keeps its output is only half a limit.
+        shutil.rmtree(out_dir, ignore_errors=True)
+        with _jobs_lock:
+            _jobs[job_id].update(status="error", error=str(exc))
     except Exception as exc:
         with _jobs_lock:
             _jobs[job_id].update(status="error", error=f"{type(exc).__name__}: {exc}")
