@@ -597,9 +597,7 @@ def start_run(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
     try:
         records = _positive_int(payload, "num_records", default=10_000)
-        periods = _positive_int(
-            payload, "periods", default=spec["entity"]["calendar"]["periods"]
-        )
+        periods = _positive_int(payload, "periods", default=spec["entity"]["calendar"]["periods"])
         seed = _non_negative_int(payload, "seed", default=42)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
