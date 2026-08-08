@@ -377,6 +377,23 @@ def test_an_unknown_scenario_surfaces_as_a_job_error(client):
     assert "no scenario" in job["error"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("num_records", 0, "num_records must be at least 1"),
+        ("periods", -1, "periods must be at least 1"),
+        ("seed", -1, "seed must be at least 0"),
+        ("num_records", 1.5, "num_records must be an integer"),
+    ],
+)
+def test_a_run_rejects_invalid_numeric_inputs(client, field, value, message):
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    response = client.post("/api/run", json={"spec": spec, field: value})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == message
+
+
 def test_polling_an_unknown_job_is_a_404(client):
     assert client.get("/api/run/deadbeef").status_code == 404
 

@@ -595,8 +595,14 @@ def start_run(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             400,
         )
 
-    records = int(payload.get("num_records") or 10_000)
-    periods = int(payload.get("periods") or spec["entity"]["calendar"]["periods"])
+    try:
+        records = _positive_int(payload, "num_records", default=10_000)
+        periods = _positive_int(
+            payload, "periods", default=spec["entity"]["calendar"]["periods"]
+        )
+        seed = _non_negative_int(payload, "seed", default=42)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if problems := _over_the_ceiling(records, periods):
         return JSONResponse({"error": "this instance has run limits", "problems": problems}, 400)
 
@@ -623,12 +629,47 @@ def start_run(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         spec,
         out_dir,
         records,
-        int(payload.get("seed") or 42),
-        payload.get("periods") or None,
+        seed,
+        periods,
         payload.get("scenario") or None,
         sample_path,
     )
     return {"job": job_id, "stages": [{"key": k, "label": v} for k, v in STAGES]}
+
+
+def _integer(payload: dict[str, Any], name: str, *, default: int) -> int:
+    """Read a JSON integer without silently turning invalid input into a default.
+
+    ``value or default`` makes ``0`` look like an omitted value, and ``int``
+    truncates a decimal. Both are surprising for a generation request and used
+    to turn malformed browser input into an internal error later in a worker.
+    """
+    value = payload.get(name, default)
+    if value is None:
+        value = default
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} must be an integer")
+    return parsed
+
+
+def _positive_int(payload: dict[str, Any], name: str, *, default: int) -> int:
+    value = _integer(payload, name, default=default)
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return value
+
+
+def _non_negative_int(payload: dict[str, Any], name: str, *, default: int) -> int:
+    value = _integer(payload, name, default=default)
+    if value < 0:
+        raise ValueError(f"{name} must be at least 0")
+    return value
 
 
 def _over_the_ceiling(records: int, periods: int) -> list[str]:
