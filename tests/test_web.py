@@ -394,6 +394,26 @@ def test_a_run_rejects_invalid_numeric_inputs(client, field, value, message):
     assert response.json()["detail"] == message
 
 
+@pytest.mark.parametrize("field", ["num_records", "periods", "seed"])
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN"])
+def test_a_run_rejects_the_non_finite_json_literals(client, field, literal):
+    """`Infinity` and `NaN` are not JSON, and `json.loads` accepts them anyway.
+
+    They have to be posted as raw text because no JSON encoder will emit them.
+    `int(nan)` raises ValueError and `int(inf)` raises OverflowError — an
+    ArithmeticError, which slips past a `(TypeError, ValueError)` clause. So the
+    two arrive together and only one of them used to be caught; the other was a
+    500 from a public endpoint.
+    """
+    spec = client.get(f"/api/packs/{PACK}").json()["spec"]
+    body = json.dumps({"spec": spec})[:-1] + f', "{field}": {literal}}}'
+
+    response = client.post("/api/run", content=body, headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 400, f"{field}={literal} should not be a 500"
+    assert response.json()["detail"] == f"{field} must be an integer"
+
+
 def test_polling_an_unknown_job_is_a_404(client):
     assert client.get("/api/run/deadbeef").status_code == 404
 

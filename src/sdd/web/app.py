@@ -662,7 +662,13 @@ def _integer(payload: dict[str, Any], name: str, *, default: int) -> int:
         raise ValueError(f"{name} must be an integer")
     try:
         parsed = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # OverflowError, not only ValueError: `int(nan)` raises ValueError but
+        # `int(inf)` raises OverflowError, which is an ArithmeticError and walks
+        # straight past a `(TypeError, ValueError)` clause. Infinity reaches here
+        # because `json.loads` accepts the non-standard `Infinity` and `NaN`
+        # literals by default, so a browser can post either. The two look like
+        # one case and are not.
         raise ValueError(f"{name} must be an integer") from exc
     if isinstance(value, float) and not value.is_integer():
         raise ValueError(f"{name} must be an integer")
