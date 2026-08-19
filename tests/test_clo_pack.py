@@ -39,7 +39,8 @@ def test_the_default_run_completes_and_validates(run):
 def test_the_shape_matches_the_specification(run):
     result, _ = run
     spec = api.load(PACK)
-    assert 55 <= len(spec.columns) <= 70, "the spec asks for roughly 55-70 columns"
+    # Output columns, not declared ones: obligor attributes live on the group now.
+    assert 55 <= len(spec.output_columns()) <= 70, "the spec asks for roughly 55-70 columns"
     assert result["entities"] == 500
     assert result["periods"] == 36
     assert spec.entity.id_column == "facility_id"
@@ -187,10 +188,11 @@ def test_the_pack_does_not_overclaim():
     to make the limitation visible, not to protect it.
     """
     spec = api.load(PACK)
-    assert not getattr(spec, "groups", None), (
-        "the pack now has obligor grouping; update the docs, add the concentration "
-        "invariant, and remove this assertion"
-    )
+    # Grouping has landed, so this assertion has inverted: the pack must now
+    # genuinely have obligors rather than genuinely lack them.
+    assert spec.groups, "obligor grouping disappeared"
+    assert spec.groups[0].columns, "the obligor carries no attributes of its own"
+
     rating_matrix = [h for h in spec.lifecycle.hazards if "rating" in h.name.lower()]
     assert not rating_matrix, "ratings are derived, not migrated by their own matrix"
 

@@ -47,6 +47,8 @@ def build_book(
     id_offset: int = 0,
     at: str | None = None,
     progress: ProgressFn | None = None,
+    group_state: dict[str, pd.DataFrame] | None = None,
+    fresh_cohort: bool = False,
 ) -> pd.DataFrame:
     """Generate a book of ``num_records`` entities.
 
@@ -84,6 +86,15 @@ def build_book(
         df, polish_note = _polish(spec, df, sample)
         if notes is not None:
             notes["polish"] = polish_note
+
+    # Groups before randomness and before derivations: a group attribute is an
+    # input to both, and joining it afterwards would leave derived columns
+    # computed from values that were not there yet.
+    if spec.groups:
+        from sdd.generate.groups import attach_groups
+
+        report("groups", 0.53)
+        df = attach_groups(spec, df, rng, state=group_state, fresh_cohort=fresh_cohort)
 
     report("randomness", 0.54)
     from sdd.generate.randomness import apply_randomness
