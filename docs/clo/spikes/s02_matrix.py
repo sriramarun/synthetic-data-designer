@@ -16,16 +16,24 @@ from sdd.spec import SpecError
 
 PACK = "auto_abs_esma_annex5"
 
-STATES = ["Performing", "Watchlist", "Distressed", "Defaulted",
-          "Recovered", "Prepaid", "Sold", "Matured"]
+STATES = [
+    "Performing",
+    "Watchlist",
+    "Distressed",
+    "Defaulted",
+    "Recovered",
+    "Prepaid",
+    "Sold",
+    "Matured",
+]
 TERMINAL = ["Recovered", "Prepaid", "Sold", "Matured"]
 
 # Rows over the 4 non-terminal states, in order. Directional only (§10).
 MATRIX = [
-    [0.960, 0.030, 0.008, 0.002],   # Performing
-    [0.180, 0.700, 0.100, 0.020],   # Watchlist
-    [0.030, 0.150, 0.740, 0.080],   # Distressed
-    [0.000, 0.000, 0.000, 1.000],   # Defaulted — absorbing; leaves via dwell hazard
+    [0.960, 0.030, 0.008, 0.002],  # Performing
+    [0.180, 0.700, 0.100, 0.020],  # Watchlist
+    [0.030, 0.150, 0.740, 0.080],  # Distressed
+    [0.000, 0.000, 0.000, 1.000],  # Defaulted — absorbing; leaves via dwell hazard
 ]
 
 
@@ -42,13 +50,23 @@ def clo_spec(extra_hazards: list | None = None, *, with_matured: bool = True) ->
         "transitions": MATRIX,
         "initial_distribution": {"Performing": 0.94, "Watchlist": 0.05, "Distressed": 0.01},
         "hazards": [
-            {"kind": "bernoulli", "name": "prepayment", "annual_rate": 0.20,
-             "to_state": "Prepaid", "excluded_states": ["Defaulted"]},
-            {"kind": "bernoulli", "name": "trading", "annual_rate": 0.12,
-             "to_state": "Sold"},
-            {"kind": "dwell_time", "name": "recovery_lag", "from_state": "Defaulted",
-             "periods": 6, "to_state": "Recovered"},
-        ] + (extra_hazards or []),
+            {
+                "kind": "bernoulli",
+                "name": "prepayment",
+                "annual_rate": 0.20,
+                "to_state": "Prepaid",
+                "excluded_states": ["Defaulted"],
+            },
+            {"kind": "bernoulli", "name": "trading", "annual_rate": 0.12, "to_state": "Sold"},
+            {
+                "kind": "dwell_time",
+                "name": "recovery_lag",
+                "from_state": "Defaulted",
+                "periods": 6,
+                "to_state": "Recovered",
+            },
+        ]
+        + (extra_hazards or []),
     }
     # The old pack's per-state forced values name states that no longer exist.
     spec["lifecycle"].pop("state_fields", None)
@@ -85,10 +103,16 @@ for s in STATES:
 # --- B. can maturity be expressed as a hazard? ----------------------------
 print("\n  maturity as a condition on a column:")
 try:
-    spec2, _ = clo_spec(extra_hazards=[{
-        "kind": "condition", "name": "maturity",
-        "when": "months_to_maturity <= 0", "to_state": "Matured",
-    }])
+    spec2, _ = clo_spec(
+        extra_hazards=[
+            {
+                "kind": "condition",
+                "name": "maturity",
+                "when": "months_to_maturity <= 0",
+                "to_state": "Matured",
+            }
+        ]
+    )
     api.load(spec2)
     print("    condition hazard: ACCEPTED")
 except SpecError as exc:

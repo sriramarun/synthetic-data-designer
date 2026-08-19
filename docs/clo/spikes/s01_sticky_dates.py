@@ -31,18 +31,28 @@ def build(expr_template: str) -> tuple[dict, str, str]:
     terminal = set(lc.get("terminal") or [])
     absorbing = set(lc.get("absorbing") or [])
     # A state an entity lands in and stays in, so drift is visible if it happens.
-    watch = next(s for s in lc["states"] if s in absorbing) if absorbing else \
-        [s for s in lc["states"] if s not in terminal][-1]
+    watch = (
+        next(s for s in lc["states"] if s in absorbing)
+        if absorbing
+        else [s for s in lc["states"] if s not in terminal][-1]
+    )
 
     spec["columns"].append(
-        {"name": "spike_event_date", "dtype": "str",
-         "generator": {"kind": "constant", "value": None}}
+        {
+            "name": "spike_event_date",
+            "dtype": "str",
+            "generator": {"kind": "constant", "value": None},
+        }
     )
     if spec.get("emit", {}).get("column_order"):
         spec["emit"]["column_order"].append("spike_event_date")
     spec["derivations"].append(
-        {"target": "spike_event_date", "kind": "expr", "stage": "period",
-         "expr": expr_template.format(s=state_col, w=watch, t=time_col)}
+        {
+            "target": "spike_event_date",
+            "kind": "expr",
+            "stage": "period",
+            "expr": expr_template.format(s=state_col, w=watch, t=time_col),
+        }
     )
     return spec, state_col, watch
 
@@ -67,8 +77,13 @@ for label, expr in [
 ]:
     spec, state_col, watch = build(expr)
     loaded = api.load(spec)
-    res = api.run(spec, 400, tmp / label.replace("(", "").replace(")", "").replace(" ", "_"),
-                  seed=7, validate_output=False)
+    res = api.run(
+        spec,
+        400,
+        tmp / label.replace("(", "").replace(")", "").replace(" ", "_"),
+        seed=7,
+        validate_output=False,
+    )
     panel = pd.read_parquet(res["panel"])
     if label.startswith("naive"):
         print(f"  (trigger state: {watch!r}, time column: {loaded.entity.time_column!r})\n")
