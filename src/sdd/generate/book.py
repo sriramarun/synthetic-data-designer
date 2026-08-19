@@ -87,6 +87,18 @@ def build_book(
         if notes is not None:
             notes["polish"] = polish_note
 
+    # The opening state mix, if the spec declares one.
+    #
+    # `initial_distribution` is documented as "the state mix at period 0", and
+    # until now it set nothing: the state column's own generator supplied the
+    # opening states and this field was read only by the rate calibration. The
+    # two shipped packs happened to carry identical numbers in both places, so
+    # nothing looked wrong — while a spec whose two disagreed got the generator's
+    # mix in the data and had its implied default and prepayment rates computed
+    # against the other one.
+    if spec.lifecycle is not None and spec.lifecycle.initial_distribution:
+        df = _apply_initial_states(spec, df, rng)
+
     # Groups before randomness and before derivations: a group attribute is an
     # input to both, and joining it afterwards would leave derived columns
     # computed from values that were not there yet.
@@ -212,6 +224,26 @@ def _apply_initial_state_fields(spec: DesignSpec, df: pd.DataFrame) -> pd.DataFr
     from sdd.age.panel import apply_state_fields
 
     return apply_state_fields(spec, df, df[lc.state_column].to_numpy())
+
+
+def _apply_initial_states(
+    spec: DesignSpec, df: pd.DataFrame, rng: np.random.Generator
+) -> pd.DataFrame:
+    """Draw the period-0 state from the lifecycle's declared opening mix.
+
+    Overwrites whatever the state column's generator produced. That is the point:
+    a spec that says both should have one of them win, and the lifecycle is the
+    more specific statement — a generator describes a column, an opening mix
+    describes the book.
+    """
+    lc = spec.lifecycle
+    assert lc is not None and lc.initial_distribution
+
+    states = list(lc.initial_distribution)
+    weights = np.array([lc.initial_distribution[s] for s in states], dtype=float)
+    weights = weights / weights.sum()
+    df[lc.state_column] = rng.choice(states, size=len(df), p=weights)
+    return df
 
 
 def apply_derivations(
