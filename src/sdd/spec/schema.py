@@ -478,7 +478,34 @@ class DwellTimeHazard(_Base):
     periods: int = Field(ge=1)
 
 
-Hazard = Annotated[BernoulliHazard | DwellTimeHazard, Field(discriminator="kind")]
+class ConditionHazard(_Base):
+    """Fires when an expression over the entity's own columns becomes true.
+
+    The other two hazards are blind to the data: Bernoulli is a flat chance and
+    dwell-time is a fixed count of periods, so both treat every entity alike.
+    Maturity does not work that way — a loan matures when *its own* maturity date
+    arrives, and a 24-month loan and a 72-month one written the same day mature
+    four years apart. That is a condition on a column, and it is what this
+    expresses.
+
+    Deterministic, so it is evaluated before the probabilistic hazards and before
+    the matrix: an entity that has reached its maturity date has matured, and
+    cannot then be drawn into being prepaid or sold in the same period.
+    """
+
+    kind: Literal["condition"] = "condition"
+    name: str
+    when: str = Field(
+        description="Expression over the entity's columns, e.g. 'months_to_maturity <= 0'."
+    )
+    to_state: str
+    from_states: list[str] | None = Field(
+        default=None, description="Only these states are eligible. Default: all non-terminal."
+    )
+    excluded_states: list[str] = Field(default_factory=list)
+
+
+Hazard = Annotated[BernoulliHazard | DwellTimeHazard | ConditionHazard, Field(discriminator="kind")]
 
 
 class Lifecycle(_Base):
