@@ -361,6 +361,13 @@ def _check_lifecycle_wiring(spec: DesignSpec) -> list[str]:
     reachable = set(lc.resolved_transition_states)
     for hz in lc.hazards:
         reachable.add(hz.to_state)
+    # A state every entity *starts* in is reached, even if nothing transitions
+    # into it. That is a whole family of products: interest-only before
+    # repayment, deferment before a student loan amortises, a promotional rate
+    # before the standard one, a revolving period before an amortising one.
+    # Without this the loader calls the opening phase dead and refuses the spec.
+    if lc.initial_distribution:
+        reachable |= {name for name, share in lc.initial_distribution.items() if share > 0}
     orphans = sorted(states - reachable)
     if orphans:
         problems.append(
