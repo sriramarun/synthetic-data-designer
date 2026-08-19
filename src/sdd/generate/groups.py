@@ -182,7 +182,7 @@ def attach_groups(
         else:
             # A cohort joining an open pool: some entities belong to borrowers
             # the book already has, the rest bring new ones.
-            new_count = int(round(n * group.new_group_rate))
+            new_count = round(n * group.new_group_rate)
             minted = pd.DataFrame()
             if new_count:
                 wanted = max(1, group.group_count(new_count))
