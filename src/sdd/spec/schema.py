@@ -892,6 +892,14 @@ class Scenario(_Base):
         "2.0 doubles the chance of falling behind.",
     )
     prepayment_multiplier: float = Field(default=1.0, ge=0.0)
+    recovery_multiplier: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Scales `dynamics.recovery.rate`. A downturn that raises defaults usually "
+        "lowers what comes back from them too, and without this a stress scenario recovers as "
+        "much per write-off as the base case. The product is capped at 1.0 — a recovery cannot "
+        "exceed the balance it recovers against.",
+    )
     index_shift: dict[str, float] = Field(
         default_factory=dict,
         description="index name -> additive change to its annualised rate, e.g. {hpi: -0.10}.",
