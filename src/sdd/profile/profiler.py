@@ -387,6 +387,40 @@ def profile_column(
         note=note,
     )
 
+    # A column empty at the first cut-off but filled in later.
+    #
+    # Event dates are the common case: a loan has no default date on day one and
+    # acquires one the month it defaults. Generators are fitted to the first
+    # cut-off, so the sample is empty, and every branch below assumes it is not —
+    # `fit_categorical` refused to build from nothing and the whole profile run
+    # died on the column.
+    #
+    # Empty *is* the answer for the opening book: the column starts blank. What
+    # is lost is that something fills it later, and no amount of looking at
+    # period 0 reveals what. So the generator says blank, the domain is taken
+    # from the whole panel so the validator accepts the values that do arrive,
+    # and the note tells whoever reads the spec that a rule is missing.
+    if clean.empty and series.notna().any():
+        from sdd.spec.schema import ConstantGen
+
+        later = series.dropna()
+        profile.fit = Fit(
+            ConstantGen(value=None),
+            "constant",
+            0.0,
+            0.4,
+            note=(
+                f"empty at the first cut-off and filled in later ({series.notna().sum():,} "
+                "values across the panel). Generated blank, which is correct for the opening "
+                "book; add a derivation to stamp it when the event happens."
+            ),
+        )
+        if dtype in ("category", "bool", "str", "date"):
+            profile.domain = [_plain(v) for v in sorted(later.unique(), key=str)][
+                :MAX_CATEGORICAL_VALUES
+            ]
+        return profile
+
     if dtype in ("int", "float") and not clean.empty:
         numeric = pd.to_numeric(clean, errors="coerce").dropna()
         if not numeric.empty:
