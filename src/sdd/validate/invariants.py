@@ -141,6 +141,8 @@ def validate_panel(
             else:
                 checks.append(_check_spans_contiguous(spec, con))
                 checks.append(_check_origination_window(spec, con))
+        if toggles.group_columns_stable and spec.groups:
+            checks += _check_group_columns(spec, con)
         if toggles.static_columns_stable:
             checks += _check_static_stability(spec, con, available)
         if toggles.terminal_states_absorb and spec.lifecycle:
@@ -304,6 +306,45 @@ def _check_static_stability(spec: DesignSpec, con, available: set[str]) -> list[
             CheckResult(
                 "static_columns_stable",
                 f"All {len(statics)} static column(s) hold steady across every cut-off.",
+                passed=True,
+            )
+        )
+    return results
+
+
+def _check_group_columns(spec: DesignSpec, con) -> list[CheckResult]:
+    """A group's attributes must agree across every member, in every period.
+
+    This is the check that catches a broken join. Three facilities lent to the
+    same company have to agree about that company's industry — if they disagree,
+    the attributes were generated per entity rather than per group, and every
+    figure computed by obligor is wrong while looking entirely plausible.
+
+    Deliberately two assertions, not one: constant *within a group* is what makes
+    the group real, and constant *over time* is what makes it a parent record
+    rather than a monthly observation.
+    """
+    results: list[CheckResult] = []
+    for group in spec.groups:
+        if not group.columns:
+            continue
+        key = _ident(group.key)
+        for column in group.columns:
+            col = _ident(column.name)
+            results.append(
+                _run(
+                    con,
+                    f"group_stable::{group.name}.{column.name}",
+                    f"{column.name} belongs to the {group.name}, so every member shares it.",
+                    f"SELECT {key}, COUNT(DISTINCT {col}) AS distinct_values FROM panel "
+                    f"GROUP BY 1 HAVING COUNT(DISTINCT {col}) > 1",
+                )
+            )
+    if not results and spec.groups:
+        results.append(
+            CheckResult(
+                "group_columns_stable",
+                "No group attributes declared.",
                 passed=True,
             )
         )

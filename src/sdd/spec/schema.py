@@ -125,6 +125,107 @@ class Target(_Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# groups — several entities sharing one parent
+# ---------------------------------------------------------------------------
+
+
+class GroupSize(_Base):
+    """How members spread across groups.
+
+    Real books are lumpy. A handful of borrowers carry several facilities while
+    most carry one, and a rule that hands every group the same number of members
+    produces a portfolio no concentration limit would ever bite on.
+    """
+
+    kind: Literal["zipf", "uniform", "fixed"] = "zipf"
+    concentration: float = Field(
+        default=1.4,
+        gt=1.0,
+        description="Zipf exponent. Higher is flatter; nearer 1.0 concentrates members "
+        "into a few large groups.",
+    )
+    max_members: int | None = Field(
+        default=None, ge=1, description="Cap on members per group. None means uncapped."
+    )
+
+
+class Group(_Base):
+    """A parent record several entities share.
+
+    The entity stays the unit of the panel — a facility, a loan, an account. A
+    group is the thing behind several of them: the obligor behind three
+    facilities, the household behind a mortgage and a buy-to-let, the dealer
+    behind a month of car loans.
+
+    What makes this more than a category column is that a group carries its
+    **own** attributes, generated once and identical for every member. Three
+    facilities lent to the same company must agree about that company's industry,
+    country and revenue. Generated per facility they would disagree, and any
+    analysis by obligor would be meaningless.
+
+    **Shape.** Many entities to one group. One entity belonging to *several*
+    groups — two named borrowers on a single mortgage — is a different shape and
+    is not this: model those as columns of the entity, or make the household the
+    group and let it hold several loans.
+    """
+
+    name: str = Field(description="What the group is, e.g. 'obligor'.")
+    key: str = Field(description="Column holding the group identifier on each entity.")
+    count: int | None = Field(
+        default=None, ge=1, description="How many groups exist. Give this or `ratio`."
+    )
+    ratio: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description="Groups as a share of entities, e.g. 0.45 for 225 groups per 500 "
+        "entities. Survives a change in run size, which `count` does not.",
+    )
+    id_format: str = Field(
+        default="G{seq:06d}",
+        description="Format for the group identifier. '{seq}' is the 1-based group number.",
+    )
+    size: GroupSize = Field(default_factory=GroupSize)
+    columns: list[Column] = Field(
+        default_factory=list,
+        description="Attributes of the group itself, generated once and shared by every "
+        "member. These reach the output like any other column.",
+    )
+    new_group_rate: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Share of entities joining an open pool that belong to a *new* group. "
+        "The rest attach to a group that already exists — a lender lends again to a "
+        "borrower it already has.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> Group:
+        if (self.count is None) == (self.ratio is None):
+            raise ValueError(
+                f"group {self.name!r} needs exactly one of `count` (a fixed number of "
+                "groups) or `ratio` (a share of the entity count)"
+            )
+        names = [c.name for c in self.columns]
+        if len(set(names)) != len(names):
+            raise ValueError(f"group {self.name!r} declares duplicate columns")
+        if self.key in names:
+            raise ValueError(
+                f"group {self.name!r} lists its own key {self.key!r} as an attribute; "
+                "the key is generated from `id_format`"
+            )
+        return self
+
+    def group_count(self, entities: int) -> int:
+        """How many groups a book of ``entities`` entities has."""
+        if self.count is not None:
+            return min(self.count, entities)
+        assert self.ratio is not None
+        return max(1, min(int(round(entities * self.ratio)), entities))
+
+
 class Entity(_Base):
     id_column: str = Field(description="Column holding the per-entity identifier, e.g. loan_id.")
     id_format: str | None = Field(
@@ -278,8 +379,19 @@ class UUIDGen(_Base):
 
 
 class ConstantGen(_Base):
+    """The same value for every entity, including no value at all.
+
+    ``value`` defaults to None rather than being required, and that is not
+    cosmetic. A column seeded empty and filled later by a per-period derivation —
+    an event date stamped when the event happens — is written ``value: null``.
+    Required, the field is dropped by ``model_dump(exclude_none=True)``, which is
+    exactly how the web layer hands a pack to the browser: the spec would come
+    back missing the field and fail to validate, so a pack using this pattern
+    could be loaded in the wizard and then refused when run.
+    """
+
     kind: Literal["constant"] = "constant"
-    value: Any
+    value: Any = None
 
 
 Generator = Annotated[
@@ -1061,6 +1173,7 @@ class InvariantToggles(_Base):
     domains_respected: bool = True
     counters_step_correctly: bool = True
     state_fields_applied: bool = True
+    group_columns_stable: bool = True
     non_negative_balances: bool = True
 
 
@@ -1099,6 +1212,10 @@ class DesignSpec(_Base):
     lifecycle: Lifecycle | None = None
     dynamics: Dynamics = Field(default_factory=Dynamics)
     generation: Generation = Field(default_factory=Generation)
+    groups: list[Group] = Field(
+        default_factory=list,
+        description="Parent records several entities share, e.g. an obligor behind several facilities.",
+    )
     originations: Originations | None = None
     scenarios: dict[str, Scenario] = Field(default_factory=dict)
     emit: Emit = Field(default_factory=Emit)
@@ -1125,10 +1242,26 @@ class DesignSpec(_Base):
         return [c.name for c in self.columns if c.role in ("static", "constant")]
 
     def output_columns(self) -> list[str]:
-        """The columns written to disk, in order."""
+        """The columns written to disk, in order.
+
+        Group attributes are joined onto every member, so they are output columns
+        like any other — a spec should not have to declare them twice.
+        """
         if self.emit.column_order:
             return list(self.emit.column_order)
-        return [c.name for c in self.columns if c.role != "helper"]
+        own = [c.name for c in self.columns if c.role != "helper"]
+        # The key as well as the attributes: without the identifier a reader
+        # cannot tell which rows belong to the same parent, which is the whole
+        # point of having one.
+        grouped: list[str] = []
+        for group in self.groups:
+            grouped.append(group.key)
+            grouped += [c.name for c in group.columns if c.role != "helper"]
+        return own + [name for name in grouped if name not in own]
+
+    @property
+    def group_column_names(self) -> list[str]:
+        return [c.name for g in self.groups for c in g.columns]
 
     @model_validator(mode="after")
     def _check(self) -> DesignSpec:

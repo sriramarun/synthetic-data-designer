@@ -89,11 +89,9 @@ constants:
 # columns
 # ---------------------------------------------------------------------------
 #
-# `obligor_id` is 1:1 with `facility_id` in this version. A real CLO holds
-# several facilities per company, and the concentration limits every investor
-# cares about are stated per *obligor*, not per facility. Grouping is a generic
-# engine capability that does not exist yet; until it does, this pack cannot
-# claim to model obligor concentration and does not try to.
+# The obligor is a `group`: one company, several facilities, and the company's
+# own attributes generated once and shared. Concentration limits are stated per
+# obligor, so this is what makes them measurable.
 
 columns:
   # -- deal and reporting ---------------------------------------------------
@@ -138,13 +136,6 @@ columns:
     description: Unique facility identifier, stable across cut-offs.
     generator: {kind: sequence, prefix: "FAC", width: 9}
 
-  - name: obligor_id
-    role: static
-    dtype: str
-    description: >-
-      Borrowing company. One per facility in this version — see the note above.
-    generator: {kind: sequence, prefix: "OBL", width: 9}
-
   - name: facility_type
     role: static
     dtype: category
@@ -155,82 +146,6 @@ columns:
       values: [Term Loan B, Term Loan A, Revolver, Second Lien Term Loan]
       weights: [0.78, 0.08, 0.06, 0.08]
 
-  - name: industry
-    role: static
-    dtype: category
-    description: Obligor industry. No sector dominates the default portfolio.
-    domain: [Business Services, Healthcare, Software, Telecommunications,
-             Industrials, Consumer Products, Retail, Media, Chemicals,
-             Transportation, Food & Beverage, Financial Services, Energy,
-             Packaging, Other]
-    generator:
-      kind: categorical
-      values: [Business Services, Healthcare, Software, Telecommunications,
-               Industrials, Consumer Products, Retail, Media, Chemicals,
-               Transportation, Food & Beverage, Financial Services, Energy,
-               Packaging, Other]
-      weights: [0.115, 0.105, 0.100, 0.070, 0.085, 0.075, 0.060, 0.055,
-                0.055, 0.050, 0.050, 0.045, 0.040, 0.040, 0.055]
-
-  - name: obligor_country
-    role: static
-    dtype: category
-    description: Country of the borrowing company.
-    domain: [United Kingdom, France, Germany, Netherlands, Spain, Italy,
-             Sweden, Ireland, Luxembourg, Other Europe]
-    generator:
-      kind: categorical
-      values: [United Kingdom, France, Germany, Netherlands, Spain, Italy,
-               Sweden, Ireland, Luxembourg, Other Europe]
-      weights: [0.20, 0.17, 0.15, 0.09, 0.07, 0.07, 0.05, 0.05, 0.05, 0.10]
-
-  - name: public_private_flag
-    role: static
-    dtype: category
-    description: Whether the obligor is publicly listed.
-    domain: ["Y", "N"]
-    generator: {kind: categorical, values: ["Y", "N"], weights: [0.22, 0.78]}
-
-  # -- obligor financials ---------------------------------------------------
-  - name: revenue_eur
-    role: static
-    dtype: float
-    min: 0.0
-    description: Annual revenue of the obligor.
-    generator:
-      kind: scipy
-      dist: lognorm
-      params: {s: 0.78, loc: 0.0, scale: 420000000.0}
-      decimals: 0
-      clip_min: 25000000.0
-      clip_max: 12000000000.0
-
-  - name: ebitda_margin_pct
-    role: static
-    dtype: float
-    description: EBITDA as a share of revenue, in per cent.
-    generator:
-      kind: gaussian
-      mean: 18.5
-      stddev: 6.0
-      decimals: 2
-      clip_min: 3.0
-      clip_max: 45.0
-
-  - name: leverage_ratio
-    role: static
-    dtype: float
-    min: 0.0
-    description: Net debt to EBITDA. The defining feature of a leveraged loan.
-    generator:
-      kind: scipy
-      dist: lognorm
-      params: {s: 0.30, loc: 0.0, scale: 4.9}
-      decimals: 2
-      clip_min: 1.5
-      clip_max: 11.0
-
-  # -- facility economics ---------------------------------------------------
   - name: original_facility_amount
     role: static
     dtype: float
@@ -812,6 +727,98 @@ derivations:
     stage: period
 
 # ---------------------------------------------------------------------------
+# groups — the obligor behind the facilities
+# ---------------------------------------------------------------------------
+#
+# 500 facilities across roughly 225 companies, so a typical obligor carries two
+# and a few carry several. Industry, country and financials belong to the
+# company, not to each loan: three facilities lent to the same business must
+# agree about what that business is.
+#
+# `new_group_rate: 0.6` means three in five acquisitions bring a new obligor and
+# two in five are additional lending to a company the portfolio already holds,
+# which is how a manager actually builds a book.
+
+groups:
+  - name: obligor
+    key: obligor_id
+    ratio: 0.45
+    id_format: "OBL{seq:05d}"
+    new_group_rate: 0.6
+    size:
+      kind: zipf
+      concentration: 1.6
+      max_members: 6
+    columns:
+      - name: industry
+        dtype: category
+        description: Industry of the borrowing company.
+        domain: [Business Services, Healthcare, Software, Telecommunications,
+                 Industrials, Consumer Products, Retail, Media, Chemicals,
+                 Transportation, Food & Beverage, Financial Services, Energy,
+                 Packaging, Other]
+        generator:
+          kind: categorical
+          values: [Business Services, Healthcare, Software, Telecommunications,
+                   Industrials, Consumer Products, Retail, Media, Chemicals,
+                   Transportation, Food & Beverage, Financial Services, Energy,
+                   Packaging, Other]
+          weights: [0.115, 0.105, 0.100, 0.070, 0.085, 0.075, 0.060, 0.055,
+                    0.055, 0.050, 0.050, 0.045, 0.040, 0.040, 0.055]
+
+      - name: obligor_country
+        dtype: category
+        description: Country of the borrowing company.
+        domain: [United Kingdom, France, Germany, Netherlands, Spain, Italy,
+                 Sweden, Ireland, Luxembourg, Other Europe]
+        generator:
+          kind: categorical
+          values: [United Kingdom, France, Germany, Netherlands, Spain, Italy,
+                   Sweden, Ireland, Luxembourg, Other Europe]
+          weights: [0.20, 0.17, 0.15, 0.09, 0.07, 0.07, 0.05, 0.05, 0.05, 0.10]
+
+      - name: public_private_flag
+        dtype: category
+        description: Whether the company is publicly listed.
+        domain: ["Y", "N"]
+        generator: {kind: categorical, values: ["Y", "N"], weights: [0.22, 0.78]}
+
+      - name: revenue_eur
+        dtype: float
+        min: 0.0
+        description: Annual revenue of the company.
+        generator:
+          kind: scipy
+          dist: lognorm
+          params: {s: 0.78, loc: 0.0, scale: 420000000.0}
+          decimals: 0
+          clip_min: 25000000.0
+          clip_max: 12000000000.0
+
+      - name: ebitda_margin_pct
+        dtype: float
+        description: EBITDA as a share of revenue, in per cent.
+        generator:
+          kind: gaussian
+          mean: 18.5
+          stddev: 6.0
+          decimals: 2
+          clip_min: 3.0
+          clip_max: 45.0
+
+      - name: leverage_ratio
+        dtype: float
+        min: 0.0
+        description: Net debt to EBITDA, the defining feature of a leveraged loan.
+        generator:
+          kind: scipy
+          dist: lognorm
+          params: {s: 0.30, loc: 0.0, scale: 4.9}
+          decimals: 2
+          clip_min: 1.5
+          clip_max: 11.0
+
+# ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
 #
@@ -992,9 +999,25 @@ emit:
 # and counters. The custom ones below are SQL over the whole panel and cover
 # what is specific to a trading credit portfolio.
 #
-# Not here: obligor concentration. This pack has one obligor per facility, so a
-# concentration check would measure nothing and pass for the wrong reason. It
-# arrives with grouping.
+# Obligor concentration is NOT an invariant here, and that is deliberate.
+#
+# A percentage limit is a portfolio policy, not a property of the data, and it
+# moves with two things the data has every right to vary:
+#
+#   *Size.* A smaller book is genuinely more concentrated. Measured at seed 11:
+#   4.02% of par in the largest obligor at 200 facilities, 2.27% at 500, 0.68%
+#   at 1,500. Demanding 2.5% of a 200-facility portfolio asks it to be flatter
+#   than 66 obligors can be.
+#
+#   *Age.* The pool runs down from 500 facilities to around 330 as loans prepay,
+#   mature and are sold, and survivors' shares rise as the denominator shrinks.
+#   Worst cut-off reaches 2.9% on base and passes 4.5% on severe.
+#
+# Both are the behaviour a real indenture limit exists to catch. Asserting they
+# cannot happen would model the world backwards and fail most runs. What is
+# checked below is *structural* — that the grouping is real and stable — and the
+# concentration figure itself belongs in the portfolio metrics, as a number to
+# watch rather than a rule to enforce.
 
 validation:
   checks:
@@ -1116,6 +1139,24 @@ validation:
         select facility_id, par_at_default, recovery_amount
         from panel
         where recovery_amount > coalesce(par_at_default, 0) + 0.01
+
+    - name: a_facility_keeps_its_obligor
+      description: A facility cannot change which company borrowed it.
+      sql: |
+        select facility_id, count(distinct obligor_id) as n
+        from panel group by 1 having count(distinct obligor_id) > 1
+
+    - name: obligor_holds_more_than_one_facility
+      description: >-
+        The pool is genuinely grouped. If every obligor held exactly one facility
+        the grouping would be doing nothing, and every concentration figure would
+        silently be a per-facility figure.
+      sql: |
+        with per_obligor as (
+          select obligor_id as o, count(distinct facility_id) as n from panel group by 1
+        )
+        select 'no obligor holds more than one facility' as problem
+        from per_obligor having max(n) < 2
 
     - name: bullet_balance_does_not_amortise
       description: >-

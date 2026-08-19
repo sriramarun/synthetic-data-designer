@@ -777,6 +777,9 @@ def run(
     notes: dict[str, Any] = {}
     if target_notes:
         notes["targets"] = target_notes
+    # One table per group, shared by the opening book and every later cohort, so
+    # a facility acquired in month twenty can belong to an obligor from month one.
+    group_state: dict[str, pd.DataFrame] = {}
     book = build_book(
         loaded,
         num_records,
@@ -785,6 +788,7 @@ def run(
         sample=seed_data,
         notes=notes,
         progress=book_progress,
+        group_state=group_state,
     )
     book_seconds = time.time() - started
 
@@ -801,6 +805,7 @@ def run(
         scenario=chosen,
         progress=age_progress,
         max_rows=max_rows,
+        group_state=group_state,
     )
     age_seconds = time.time() - aged_at
 

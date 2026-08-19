@@ -63,6 +63,7 @@ def run_ageing(
     progress: ProgressFn | None = None,
     write_files: bool = True,
     max_rows: int | None = None,
+    group_state: dict[str, pd.DataFrame] | None = None,
 ) -> dict:
     """Age ``book`` across the spec's calendar, writing one file per period.
 
@@ -134,6 +135,7 @@ def run_ageing(
                     rng=rng,
                     opening_size=opening_size,
                     next_index=next_index,
+                    group_state=group_state,
                 )
                 next_index += joined
                 originated += joined
@@ -315,6 +317,7 @@ def originate(
     rng: np.random.Generator,
     opening_size: int,
     next_index: int,
+    group_state: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray], int]:
     """Add the entities joining the pool at this cut-off.
 
@@ -349,6 +352,8 @@ def originate(
         seed=cohort_seed,
         id_offset=next_index,
         at=date.strftime("%Y-%m-%d"),
+        group_state=group_state,
+        fresh_cohort=True,
     )
 
     lc = spec.lifecycle
