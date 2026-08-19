@@ -57,6 +57,17 @@ entity:
     periods: 36
     freq: month_end
 
+  # The deal has a size. Without this the portfolio is worth whatever 500
+  # independent draws happen to sum to, which is not how a CLO is arranged.
+  #
+  # `entities: 500` pins the target to the default run size, so asking the UI
+  # for 1,000 facilities buys a EUR 1bn portfolio of the same-sized loans rather
+  # than the same portfolio cut into smaller ones.
+  targets:
+    - column: original_facility_amount
+      total: 500_000_000
+      entities: 500
+
 params:
   deal_year: 2026
   first_cutoff_year: 2026
