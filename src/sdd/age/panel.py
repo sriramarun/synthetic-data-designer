@@ -86,7 +86,7 @@ def run_ageing(
     lc = spec.lifecycle
 
     performing_state = lc.states[0]
-    hazard_mult, index_shift = _scenario_knobs(spec, scenario)
+    hazard_mult, index_shift, recovery_mult = _scenario_knobs(spec, scenario)
 
     current = book.copy().reset_index(drop=True)
     dwell = engine.initial_dwell(len(current), engine.to_idx(current[lc.state_column].to_numpy()))
@@ -119,6 +119,7 @@ def run_ageing(
                 rng=rng,
                 hazard_mult=hazard_mult,
                 index_shift=index_shift,
+                recovery_mult=recovery_mult,
                 performing_state=performing_state,
             )
             if spec.originations is not None:
@@ -218,6 +219,7 @@ def _step(
     rng: np.random.Generator,
     hazard_mult: dict[str, float],
     index_shift: dict[str, float],
+    recovery_mult: float,
     performing_state: str,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray]]:
     lc = spec.lifecycle
@@ -271,7 +273,13 @@ def _step(
     # the entity carried in. Computed before `state_fields`, which is usually
     # what zeroes that balance.
     if spec.dynamics.recovery:
-        df = apply_recovery(spec, df, previous=engine.to_label(prev_idx), current=labels)
+        df = apply_recovery(
+            spec,
+            df,
+            previous=engine.to_label(prev_idx),
+            current=labels,
+            rate_multiplier=recovery_mult,
+        )
 
     # 5. accruals
     if spec.dynamics.accruals:
@@ -410,7 +418,12 @@ def originate(
 
 
 def apply_recovery(
-    spec: DesignSpec, df: pd.DataFrame, *, previous: np.ndarray, current: np.ndarray
+    spec: DesignSpec,
+    df: pd.DataFrame,
+    *,
+    previous: np.ndarray,
+    current: np.ndarray,
+    rate_multiplier: float = 1.0,
 ) -> pd.DataFrame:
     """Book the recovered share of the balance for entities writing off this period.
 
@@ -429,7 +442,10 @@ def apply_recovery(
     # to_numpy before filling: a balance column can arrive as object dtype, and
     # pandas' own fillna would downcast it with a deprecation warning.
     balance = np.nan_to_num(pd.to_numeric(df[rec.balance], errors="coerce").to_numpy(dtype=float))
-    booked = np.where(entering, np.round(balance * rec.rate, 2), 0.0)
+    # Capped at 1.0: a scenario may lower what comes back, and may not conjure a
+    # recovery larger than the balance being recovered against.
+    rate = min(rec.rate * rate_multiplier, 1.0)
+    booked = np.where(entering, np.round(balance * rate, 2), 0.0)
     df[rec.target] = booked
     return df
 
@@ -526,15 +542,15 @@ def _write_period(
 
 def _scenario_knobs(
     spec: DesignSpec, scenario: Scenario | None
-) -> tuple[dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float], dict[str, float], float]:
     if scenario is None:
-        return {}, {}
+        return {}, {}, 1.0
     hazard_mult = {
         hz.name: scenario.prepayment_multiplier
         for hz in (spec.lifecycle.hazards if spec.lifecycle else [])
         if hz.kind == "bernoulli"
     }
-    return hazard_mult, dict(scenario.index_shift)
+    return hazard_mult, dict(scenario.index_shift), scenario.recovery_multiplier
 
 
 def stress_transitions(spec: DesignSpec, scenario: Scenario) -> list[list[float]] | None:
