@@ -684,8 +684,10 @@ def generate(
 ) -> dict[str, Any]:
     """Build the period-0 book only."""
     from sdd.generate import build_book
+    from sdd.generate.targets import apply_targets
 
     loaded = load(spec)
+    loaded, _ = apply_targets(loaded, num_records)
     started = time.time()
     book = build_book(loaded, num_records, seed=seed, backend=backend, progress=progress)
 
@@ -732,6 +734,7 @@ def run(
     """
     from sdd.age.panel import run_ageing
     from sdd.generate import build_book
+    from sdd.generate.targets import apply_targets
 
     loaded = load(spec)
     # The hash of the spec *as loaded*, before any run-time override. Recording
@@ -769,7 +772,11 @@ def run(
 
         seed_data = sample if isinstance(sample, pd.DataFrame) else read_sample(sample)
 
+    loaded, target_notes = apply_targets(loaded, num_records)
+
     notes: dict[str, Any] = {}
+    if target_notes:
+        notes["targets"] = target_notes
     book = build_book(
         loaded,
         num_records,

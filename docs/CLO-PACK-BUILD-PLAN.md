@@ -4,7 +4,21 @@ Seven stages taking `clo_eu_leveraged_loans` from nothing to a deployed
 calibrated pack. Built from the v1 specification (26pp), checked against the
 engine as it stands at `a177797`.
 
-**Total: 9–12 engineer-weeks.** First demoable pack in 2 weeks.
+**Total: 11–15 engineer-weeks.** First demoable pack in 2 weeks.
+
+## Delivery phases
+
+| Phase | What ships | Status |
+|---|---|---|
+| **0** | Spikes — five unknowns resolved | ✅ done |
+| **1a** | Condition hazard: loans reach the end of their term | ✅ done |
+| **1b** | The CLO pack — 56 columns, 8 states, 40 invariants | ✅ done |
+| **2** | Aggregate targets — the portfolio has a size | ✅ done |
+| **3** | Obligor grouping — one company, many facilities | next |
+| **4** | The standard report — 19 per-period portfolio metrics | |
+| **5** | CLO charts — metadata-driven, built on phase 4 | |
+| **6** | Release — deploy, docs, screenshots, release tests | |
+| **7** | Rating migration — a second Markov chain | last |
 
 A rendered version of this document is published as an artifact for sharing.
 This file is the source; edit it here.
@@ -42,6 +56,7 @@ rework and is not recommended.
 | 4 · Report | Per-period portfolio metrics | 1–1.5 wk | Low | Monthly report card |
 | 5 · Charts | Metadata-driven charts | 1.5–2 wk | Med | CLO results screen |
 | 6 · Release | Deployment, docs, release tests | 1 wk | Low | Public Space |
+| 7 · Rating migration | A second Markov chain, coupled to the credit chain | 2–3 wk | **High** | CCC-bucket testing |
 
 Estimates assume one engineer familiar with the codebase and include tests and
 an artefact validator per stage. They do not include design iteration on
@@ -333,9 +348,12 @@ cash flows, equity IRR, call economics, and any replication of rating-agency
 models.
 
 Also deferred within this plan: P1 metrics (§17) — rating factor, portfolio
-turnover, diversity proxy; the sector stress overlay (§16), which the spec itself
-marks P1; and true rating migration (§7), replaced by a derived rating under the
-spec's own escape clause.
+turnover, diversity proxy; and the sector stress overlay (§16), which the spec
+itself marks P1.
+
+**Rating migration is no longer out of scope.** It moved to Phase 7 — see
+`docs/clo/ADR-001-second-markov-chain.md` for why, and for the tests that keep
+the architecture able to take it.
 
 These belong to the Phase 2 CLO Laboratory, and starting them before the
 collateral generator is validated would be the wrong order.

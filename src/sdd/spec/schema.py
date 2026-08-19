@@ -95,6 +95,36 @@ class Calendar(_Base):
         }[self.freq]
 
 
+class Target(_Base):
+    """An aggregate the portfolio should add up to, e.g. EUR 500m of collateral.
+
+    Generators draw each entity independently, so a portfolio's total is whatever
+    the draws happen to sum to. A deal has a *size*, and this is how a spec says
+    so.
+
+    It works by scaling the column's generator so the **expected** total matches,
+    not by rescaling the values that were drawn. That distinction matters once a
+    pool reinvests: rescaling the opening book alone would leave every facility
+    acquired later drawn at the unscaled size, and a portfolio whose new assets
+    are three times the size of its original ones is worse than one that misses
+    its target by a few per cent. Changing the generator applies to every cohort
+    for free, and shows up in the spec the user can download.
+
+    The cost is that the realised total varies around the target by ordinary
+    sampling error — a few per cent at a few hundred entities, less as the
+    portfolio grows.
+    """
+
+    column: str = Field(description="Numeric column whose total is being aimed at.")
+    total: float = Field(gt=0.0, description="What the column should sum to across the book.")
+    entities: int | None = Field(
+        default=None,
+        ge=1,
+        description="Entity count the total assumes. Defaults to the run's own count, so "
+        "asking for more entities buys a bigger portfolio rather than smaller loans.",
+    )
+
+
 class Entity(_Base):
     id_column: str = Field(description="Column holding the per-entity identifier, e.g. loan_id.")
     id_format: str | None = Field(
@@ -107,6 +137,10 @@ class Entity(_Base):
     )
     time_column: str = Field(description="Column holding the cut-off date of each row.")
     calendar: Calendar
+    targets: list[Target] = Field(
+        default_factory=list,
+        description="Aggregate totals the opening portfolio should come to, e.g. a deal size.",
+    )
 
 
 # ---------------------------------------------------------------------------
