@@ -226,7 +226,7 @@ def _step(
 
     # 1. lifecycle
     prev_idx = engine.to_idx(df[lc.state_column].to_numpy())
-    condition_masks = _condition_masks(engine, df, period)
+    condition_masks = _condition_masks(spec, engine, df, period)
     new_idx, dwell = engine.step(
         prev_idx,
         dwell,
@@ -457,13 +457,21 @@ def apply_state_fields(spec: DesignSpec, df: pd.DataFrame, labels: np.ndarray) -
 
 
 def _condition_masks(
-    engine: LifecycleEngine, df: pd.DataFrame, period: int
+    spec: DesignSpec, engine: LifecycleEngine, df: pd.DataFrame, period: int
 ) -> dict[str, np.ndarray]:
     """Evaluate each condition hazard's expression against the current frame.
 
     The lifecycle engine works in state indices and never sees the frame, so the
     evaluation happens here, where both the frame and the restricted expression
     evaluator are already to hand.
+
+    Counters are advanced first, on a throwaway copy. A condition describes the
+    period about to be lived, so it has to read counters as they will stand at
+    that period's close, not as they stood at its open. Without this a loan with
+    one month left is still "performing" through the month its term runs out and
+    only matures the month after — every loan reporting one period past the end
+    of its own term. The real counters still tick in their usual place; this view
+    is discarded.
     """
     hazards = engine.condition_hazards
     if not hazards:
@@ -471,10 +479,14 @@ def _condition_masks(
 
     from sdd.generate.deriver import evaluate_mask
 
+    view = df
+    if spec.dynamics.counters:
+        view = apply_counters(df.copy(), spec.dynamics.counters, spec.params)
+
     masks: dict[str, np.ndarray] = {}
     for hz in hazards:
         try:
-            masks[hz.name] = evaluate_mask(hz.when, df, {"period": period})
+            masks[hz.name] = evaluate_mask(hz.when, view, {"period": period})
         except Exception as exc:
             raise AgeingError(
                 f"condition hazard {hz.name!r} could not evaluate {hz.when!r}: {exc}"

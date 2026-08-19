@@ -136,3 +136,44 @@ def test_packs_without_a_condition_hazard_are_untouched(tmp_path):
     a = api.run(spec, 300, tmp_path / "a", seed=17, validate_output=False)
     b = api.run(spec, 300, tmp_path / "b", seed=17, validate_output=False)
     assert pd.read_parquet(a["panel"]).equals(pd.read_parquet(b["panel"]))
+
+
+def test_a_condition_fires_in_the_period_its_counter_expires(tmp_path):
+    """Not the period after.
+
+    The lifecycle step runs before counters tick, so a condition reading a
+    counter sees last period's value. Left alone, a loan with one month left
+    stays performing through the month its term runs out and matures the month
+    after — every loan reporting one period past the end of its own term.
+
+    Measured on the auto pack before the fix: 541 of 619 loans sat at zero
+    remaining term for two periods. The only rows that should show a zero term
+    are the maturing rows themselves.
+    """
+    spec = _spec(periods=36)
+    result = api.run(spec, 800, tmp_path, seed=21, validate_output=False)
+    panel = pd.read_parquet(result["panel"])
+    state_col = api.load(PACK).lifecycle.state_column
+    id_col = api.load(PACK).entity.id_column
+
+    expired = panel[panel["remaining_term_months"] <= 0]
+    assert not expired.empty, "no loan reached the end of its term in 36 periods"
+
+    # A facility that defaults is barred from maturing by `excluded_states`, and
+    # then charges off — so its final row legitimately shows a zero term without
+    # ever having matured. The claim is about facilities that were free to
+    # mature, which means never having defaulted at all, not merely not being
+    # defaulted in the row itself.
+    ever_defaulted = set(panel.loc[panel[state_col] == "Defaulted", id_col])
+    free = expired[~expired[id_col].isin(ever_defaulted)]
+    stalled = free[free[state_col] != "Matured"]
+    assert stalled.empty, (
+        f"{len(stalled)} rows have no remaining term but have not matured; "
+        "conditions are reading counters from before the period's tick"
+    )
+
+    # And each such facility shows exactly one zero-term row.
+    per_facility = free.groupby(id_col).size()
+    assert per_facility.max() == 1, (
+        "a facility reported more than one period at zero remaining term"
+    )
