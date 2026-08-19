@@ -71,7 +71,15 @@ class Calendar(_Base):
 
     start: str = Field(description="First cut-off date, ISO 8601 (YYYY-MM-DD).")
     periods: int = Field(ge=1, description="Number of cut-offs, including the first.")
-    freq: Literal["month_end", "quarter_end", "year_end", "month_start", "day"] = "month_end"
+    freq: Literal[
+        "day",
+        "week_end",
+        "fortnight_end",
+        "month_start",
+        "month_end",
+        "quarter_end",
+        "year_end",
+    ] = "month_end"
 
     @field_validator("start", mode="before")
     @classmethod
@@ -87,11 +95,17 @@ class Calendar(_Base):
     @property
     def periods_per_year(self) -> float:
         return {
-            "month_end": 12.0,
+            "day": 365.25,
+            # 52.18 and 26.09, not 52 and 26: a year is 365.25 days, and rounding
+            # here would bias every annual-to-period rate conversion — a hazard
+            # given as 12% a year would come out slightly wrong every period, and
+            # compound over a panel.
+            "week_end": 365.25 / 7.0,
+            "fortnight_end": 365.25 / 14.0,
             "month_start": 12.0,
+            "month_end": 12.0,
             "quarter_end": 4.0,
             "year_end": 1.0,
-            "day": 365.25,
         }[self.freq]
 
 
