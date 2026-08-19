@@ -28,20 +28,29 @@ def spec_with(cap: float, window_end: int) -> dict:
     s["validation"] = {
         "checks": {"closed_pool": False},
         "custom": [
-            {"name": "reconcile", "sql": f"""
+            {
+                "name": "reconcile",
+                "sql": f"""
                 with per_row as (select "{tc}" as p, sum("{balc}") as s, count(*) as n from panel group by 1)
-                select * from per_row where s is null or n = 0"""},
-            {"name": "no_late_acquisition", "sql": f"""
+                select * from per_row where s is null or n = 0""",
+            },
+            {
+                "name": "no_late_acquisition",
+                "sql": f"""
                 with first_seen as (select "{idc}" as id, min("{tc}") as joined from panel group by 1),
                      ranked as (select p, row_number() over (order by p) - 1 as idx
                                 from (select distinct "{tc}" as p from panel) c)
                 select f.id from first_seen f join ranked r on r.p = f.joined
-                where r.idx > {window_end}"""},
-            {"name": "concentration", "sql": f"""
+                where r.idx > {window_end}""",
+            },
+            {
+                "name": "concentration",
+                "sql": f"""
                 with g as (select "{tc}" as p, "{grpc}" as k, sum("{balc}") as par from panel group by 1,2),
                      t as (select p, sum(par) as total from g group by 1)
                 select g.p, g.k, g.par/t.total as share from g join t on t.p = g.p
-                where t.total > 0 and g.par/t.total > {cap}"""},
+                where t.total > 0 and g.par/t.total > {cap}""",
+            },
         ],
     }
     return s
