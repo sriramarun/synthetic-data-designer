@@ -223,7 +223,7 @@ class Group(_Base):
         if self.count is not None:
             return min(self.count, entities)
         assert self.ratio is not None
-        return max(1, min(int(round(entities * self.ratio)), entities))
+        return max(1, min(round(entities * self.ratio), entities))
 
 
 class Entity(_Base):
