@@ -226,7 +226,14 @@ def _step(
 
     # 1. lifecycle
     prev_idx = engine.to_idx(df[lc.state_column].to_numpy())
-    new_idx, dwell = engine.step(prev_idx, dwell, rng, hazard_multipliers=hazard_mult)
+    condition_masks = _condition_masks(engine, df, period)
+    new_idx, dwell = engine.step(
+        prev_idx,
+        dwell,
+        rng,
+        hazard_multipliers=hazard_mult,
+        condition_masks=condition_masks,
+    )
     labels = engine.to_label(new_idx)
     df[lc.state_column] = labels
 
@@ -447,6 +454,32 @@ def apply_state_fields(spec: DesignSpec, df: pd.DataFrame, labels: np.ndarray) -
 # ---------------------------------------------------------------------------
 # output
 # ---------------------------------------------------------------------------
+
+
+def _condition_masks(
+    engine: LifecycleEngine, df: pd.DataFrame, period: int
+) -> dict[str, np.ndarray]:
+    """Evaluate each condition hazard's expression against the current frame.
+
+    The lifecycle engine works in state indices and never sees the frame, so the
+    evaluation happens here, where both the frame and the restricted expression
+    evaluator are already to hand.
+    """
+    hazards = engine.condition_hazards
+    if not hazards:
+        return {}
+
+    from sdd.generate.deriver import evaluate_mask
+
+    masks: dict[str, np.ndarray] = {}
+    for hz in hazards:
+        try:
+            masks[hz.name] = evaluate_mask(hz.when, df, {"period": period})
+        except Exception as exc:
+            raise AgeingError(
+                f"condition hazard {hz.name!r} could not evaluate {hz.when!r}: {exc}"
+            ) from exc
+    return masks
 
 
 def to_output(spec: DesignSpec, df: pd.DataFrame) -> pd.DataFrame:

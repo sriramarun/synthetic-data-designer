@@ -16,8 +16,11 @@ Three kinds of state, and the distinction matters:
     entered the state — a redeemed loan shows a final zero balance — and then
     drops out of the pool.
 
-Each period runs in three passes, matching how these events actually sequence:
+Each period runs in four passes, matching how these events actually sequence:
 
+0. **Condition hazards**, evaluated against the entity's own columns. These are
+   facts, not chances — a loan reaching its maturity date has matured — so they
+   settle before anything probabilistic gets a say.
 1. **Bernoulli hazards**, evaluated against the *previous* state. Prepayment is
    decided before delinquency, because a borrower who pays the loan off in full
    this month never gets the chance to fall behind in it.
@@ -33,7 +36,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from sdd.spec.schema import BernoulliHazard, DwellTimeHazard, Lifecycle
+from sdd.spec.schema import BernoulliHazard, ConditionHazard, DwellTimeHazard, Lifecycle
 
 
 @dataclass
@@ -97,6 +100,10 @@ class LifecycleEngine:
     def bernoulli_hazards(self) -> list[BernoulliHazard]:
         return [h for h in self.lc.hazards if isinstance(h, BernoulliHazard)]
 
+    @property
+    def condition_hazards(self) -> list[ConditionHazard]:
+        return [h for h in self.lc.hazards if isinstance(h, ConditionHazard)]
+
     # -- the step -----------------------------------------------------------
 
     def step(
@@ -106,17 +113,42 @@ class LifecycleEngine:
         rng: np.random.Generator,
         *,
         hazard_multipliers: dict[str, float] | None = None,
+        condition_masks: dict[str, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Advance every entity one period.
 
         Returns the new state indices and the updated dwell-time counters.
         ``hazard_multipliers`` scales named hazard rates, which is how a stress
         scenario doubles prepayment or halves it without editing the spec.
+
+        ``condition_masks`` carries the already-evaluated truth of each condition
+        hazard, keyed by name. The engine works in state indices and never sees
+        the frame, so the caller — which has both the frame and the expression
+        evaluator — does the evaluating and hands the answer in.
         """
         n = len(state_idx)
         new = state_idx.copy()
         moved = np.zeros(n, dtype=bool)
         mult = hazard_multipliers or {}
+        masks = condition_masks or {}
+
+        # -- pass 0: condition hazards, which are facts rather than chances.
+        # A loan that has reached its maturity date has matured; it must not then
+        # be drawn into prepaying or being sold in the same period, so these run
+        # before both the Bernoulli pass and the matrix.
+        for hz in self.condition_hazards:
+            mask = masks.get(hz.name)
+            if mask is None:
+                continue
+            eligible = ~moved & ~self.is_terminal(state_idx) & np.asarray(mask, dtype=bool)
+            if hz.from_states:
+                allowed = np.array([self.index[s] for s in hz.from_states], dtype=np.int16)
+                eligible &= np.isin(state_idx, allowed)
+            if hz.excluded_states:
+                blocked = np.array([self.index[s] for s in hz.excluded_states], dtype=np.int16)
+                eligible &= ~np.isin(state_idx, blocked)
+            new[eligible] = self.index[hz.to_state]
+            moved |= eligible
 
         # -- pass 1: Bernoulli hazards on the previous state
         for hz in self.bernoulli_hazards:

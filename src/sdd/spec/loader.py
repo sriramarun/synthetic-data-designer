@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 from sdd.generate.deriver import expression_names
-from sdd.spec.schema import DesignSpec, DwellTimeHazard
+from sdd.spec.schema import ConditionHazard, DesignSpec, DwellTimeHazard
 
 
 class SpecError(ValueError):
@@ -329,6 +329,13 @@ def _check_lifecycle_wiring(spec: DesignSpec) -> list[str]:
         )
 
     for hz in lc.hazards:
+        if isinstance(hz, ConditionHazard):
+            # `period` is supplied by the ageing loop, not by the data.
+            for name in expression_names(hz.when):
+                if name not in _known_names(spec) and name != "period":
+                    problems.append(
+                        f"condition hazard {hz.name!r} references unknown name {name!r}"
+                    )
         if isinstance(hz, DwellTimeHazard) and hz.from_state in lc.terminal:
             problems.append(
                 f"hazard {hz.name!r} counts dwell time in {hz.from_state!r}, but that state is "
