@@ -55,14 +55,17 @@ ENV SDD_WORKSPACE=/home/user/workspace
 # row ceiling is checked inside the ageing loop, per period, against the running
 # count, so no spec can talk its way past it.
 #
-# 2.5M leaves headroom over the 2.0M worst case reachable without originations,
-# and peaks around 2.2 GB. Two at once — the run pool is two workers — is 4.4 GB,
-# comfortably inside 16 GB. Raising it is fine here and is not fine on a 512 MB
-# box elsewhere, which is why these live in the environment, not in the code.
+# 3.0M, not 2.5M, because the two ceilings above have to be jointly reachable.
+# The largest run the interface offers — 50,000 entities over 60 periods on the
+# RMBS pack — lands at 2,462,613 rows, 1.5% under a 2.5M cap. A stress scenario
+# prepays fewer loans, so more survive and more rows are written, and a request
+# the interface itself advertised would die around period 59 citing a limit the
+# user never set. 3.0M peaks near 2.6 GB; two at once — the run pool is two
+# workers — is 5.2 GB, comfortably inside 16 GB.
 ENV SDD_SHARED=1 \
     SDD_MAX_RECORDS=50000 \
     SDD_MAX_PERIODS=60 \
-    SDD_MAX_ROWS=2500000 \
+    SDD_MAX_ROWS=3000000 \
     SDD_MAX_UPLOAD_MB=50
 
 EXPOSE 7860
