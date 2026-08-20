@@ -654,8 +654,10 @@ def _write_period(
     written: list[str] = []
     stem = format_filename(spec.emit.filename, date, period, spec.meta.name)
     base, ext = os.path.splitext(stem)
+    target_dir = out_dir / spec.emit.cutoff_dir if spec.emit.cutoff_dir else out_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
     for fmt in spec.emit.formats:
-        path = out_dir / (stem if ext.lstrip(".") == fmt else f"{base}.{fmt}")
+        path = target_dir / (stem if ext.lstrip(".") == fmt else f"{base}.{fmt}")
         if fmt == "csv":
             out.to_csv(path, index=False, float_format=spec.emit.float_format)
         else:

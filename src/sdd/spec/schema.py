@@ -1207,6 +1207,13 @@ class Emit(_Base):
         default=None, description="Exact output column order. Defaults to declaration order."
     )
     formats: list[Literal["csv", "parquet"]] = Field(default_factory=lambda: ["csv"])
+    cutoff_dir: str | None = Field(
+        default=None,
+        description="Subdirectory for the per-period files, e.g. 'cutoffs'. Unset, they sit "
+        "beside the panel and the manifest, which is fine for a handful and unreadable for "
+        "sixty. Named rather than always-on, because moving them would relocate the output of "
+        "every spec already written against the flat layout.",
+    )
     panel_filename: str = "panel.parquet"
     write_panel: bool = True
     float_format: str | None = None

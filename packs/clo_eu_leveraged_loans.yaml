@@ -1035,6 +1035,9 @@ scenarios:
 
 emit:
   filename: "synthetic_clo_{yyyymm}.csv"
+  # Thirty-six monthly tapes beside the panel, the manifest and two reports is a
+  # directory nobody can read. Their own folder, per the specification's §23.
+  cutoff_dir: cutoffs
   formats: [csv]
   panel_filename: all_cutoffs.parquet
   write_panel: true
