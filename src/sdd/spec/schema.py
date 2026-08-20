@@ -1396,6 +1396,67 @@ class Metric(_Base):
         return self
 
 
+# ---------------------------------------------------------------------------
+# results — what the pack wants drawn
+# ---------------------------------------------------------------------------
+
+
+ChartKind = Literal[
+    "series",  # one metric over the cut-offs
+    "stacked_series",  # shares of a categorical column over the cut-offs
+    "category_bar",  # a column totalled by category, at the last cut-off
+    "histogram",  # the spread of a numeric column
+]
+
+
+class ChartSpec(_Base):
+    """One picture on the results screen.
+
+    The four charts drawn until now were fixed in the browser and named for a
+    mortgage: a delinquency curve and a loan-to-value distribution. A CLO run
+    drew both, and neither means anything for a corporate loan — there is no LTV,
+    and the ladder is watchlist and distress rather than days past due.
+
+    A pack declares what it wants drawn. Nothing here knows what asset class it
+    is looking at, which is the point: the alternative was a branch on the pack's
+    name in the interface.
+    """
+
+    kind: ChartKind
+    title: str
+    metric: str | None = Field(
+        default=None,
+        description="A metric to plot over the cut-offs. Cheaper and more consistent than "
+        "re-aggregating the panel: the number drawn is then the same number the report "
+        "carries, rather than a second calculation of it.",
+    )
+    column: str | None = Field(default=None, description="Column being charted.")
+    group: str | None = Field(default=None, description="Column to group by, for a bar chart.")
+    states: list[str] | None = Field(
+        default=None, description="Which values to stack, in order. Defaults to all of them."
+    )
+    unit: Literal["money", "percent", "count", "number"] = "number"
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> ChartSpec:
+        if self.kind == "series" and not (self.metric or self.column):
+            raise ValueError(f"chart {self.title!r} plots nothing: give a `metric` or a `column`")
+        if self.kind == "stacked_series" and not self.column:
+            raise ValueError(f"chart {self.title!r} stacks nothing: give a `column`")
+        if self.kind == "category_bar" and not (self.group and self.column):
+            raise ValueError(f"chart {self.title!r} needs both `group` and `column`")
+        if self.kind == "histogram" and not self.column:
+            raise ValueError(f"chart {self.title!r} has no `column` to spread")
+        return self
+
+
+class Results(_Base):
+    """The results screen, as this pack wants it."""
+
+    charts: list[ChartSpec] = Field(default_factory=list)
+
+
 class DesignSpec(_Base):
     spec_version: int = SPEC_VERSION
     meta: Meta
@@ -1424,6 +1485,10 @@ class DesignSpec(_Base):
     metrics: list[Metric] = Field(
         default_factory=list,
         description="Portfolio-level figures computed at every cut-off.",
+    )
+    results: Results = Field(
+        default_factory=Results,
+        description="Charts the results screen should draw for this pack.",
     )
     emit: Emit = Field(default_factory=Emit)
     validation: Validation = Field(default_factory=Validation)

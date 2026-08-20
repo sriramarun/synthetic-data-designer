@@ -820,6 +820,9 @@ def charts(job_id: str, columns: str | None = None) -> dict[str, Any]:
             _safe_path(_workspace(), panel),
             reference=reference,
             columns=[c for c in (columns or "").split(",") if c] or None,
+            # A series chart plots the figure the report already carries rather
+            # than recomputing it, so the two cannot disagree on screen.
+            metrics=job["result"].get("metrics") or None,
         )
     except Exception as exc:
         raise HTTPException(400, f"could not build the charts: {exc}") from exc

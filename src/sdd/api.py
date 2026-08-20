@@ -958,11 +958,12 @@ def charts(
     *,
     reference: str | Path | pd.DataFrame | None = None,
     columns: list[str] | None = None,
+    metrics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Every chart the results view draws, aggregated server-side."""
     from sdd.validate import build_charts
 
-    return build_charts(load(spec), panel, reference, columns=columns)
+    return build_charts(load(spec), panel, reference, columns=columns, metrics=metrics)
 
 
 def table(

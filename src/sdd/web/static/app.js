@@ -1495,6 +1495,7 @@ async function loadCharts(column = null) {
       ? "Generated data against the sample it was built from, on shared bins."
       : "Generated data. Upload sample data in step 1 to compare it against the real thing.";
     renderDistribution($("#chart-distribution"), distribution);
+    renderPackCharts(charts.configured || []);
     renderDelinquency($("#chart-delinquency"), charts.delinquency, charts.unavailable.delinquency);
     renderLtv($("#chart-ltv"), charts.ltv, charts.unavailable.ltv);
     renderBalance($("#chart-balance"), charts.pool_balance, charts.unavailable.pool_balance);
@@ -1875,3 +1876,173 @@ async function boot() {
 }
 
 boot();
+
+/* Charts a pack asked for.
+ *
+ * The four drawn before this were fixed here and named for a mortgage — a
+ * delinquency curve and a loan-to-value distribution. A CLO run drew both, and
+ * neither means anything for a corporate loan: there is no LTV, and the ladder
+ * is watchlist and distress rather than days past due. A pack now says what it
+ * wants, and when it does the mortgage-shaped pair steps aside rather than
+ * sitting underneath drawing nothing.
+ *
+ * The distribution comparison stays either way. It works off any numeric column
+ * and is the one chart that is genuinely about the data rather than the asset. */
+function renderPackCharts(configured) {
+  const host = $("#pack-charts");
+  const pair = $("#legacy-charts-pair");
+  const balance = $("#legacy-chart-balance");
+  host.replaceChildren();
+
+  const declared = configured.length > 0;
+  if (pair) pair.hidden = declared;
+  if (balance) balance.hidden = declared;
+  if (!declared) return;
+
+  // Two to a row, so a portfolio and the thing that explains it sit side by side.
+  let row = null;
+  configured.forEach((chart, index) => {
+    if (index % 2 === 0) {
+      row = el("div", { class: "grid two" });
+      host.append(row);
+    }
+    const body = el("div", { class: "chart-host" });
+    row.append(el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [el("h2", { text: chart.title })]),
+      chart.description ? el("p", { class: "hint", text: chart.description }) : null,
+      body,
+    ].filter(Boolean)));
+
+    if (chart.unavailable) {
+      empty(body, chart.unavailable);
+      return;
+    }
+    try {
+      if (chart.kind === "series") renderSeries(body, chart);
+      else if (chart.kind === "stacked_series") renderStacked(body, chart);
+      else if (chart.kind === "category_bar") renderCategoryBar(body, chart);
+      else if (chart.kind === "histogram") renderHistogram(body, chart);
+      else empty(body, `no renderer for a ${chart.kind} chart`);
+    } catch (error) {
+      empty(body, error.message);
+    }
+  });
+}
+
+function axisFormat(unit) {
+  if (unit === "money") return (v) => fmt.money(v);
+  if (unit === "percent") return (v) => `${(v * 100).toFixed(1)}%`;
+  if (unit === "count") return (v) => fmt.int(v);
+  return (v) => (Math.abs(v) >= 1000 ? fmt.int(v) : v.toFixed(2));
+}
+
+function renderSeries(host, chart) {
+  const values = chart.values.map((v) => (v == null ? 0 : v));
+  if (!values.length) return empty(host, "no periods to draw");
+  const format = axisFormat(chart.unit);
+  const f = frame(host);
+  const peak = Math.max(...values, 0) * 1.05 || 1;
+  gridlines(f, peak, format);
+
+  const n = values.length;
+  const x = (i) => f.pad.l + (n === 1 ? f.innerW / 2 : (i / (n - 1)) * f.innerW);
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+
+  f.svg.append(svgNode("polygon", {
+    points: [`${x(0)},${y(0)}`, ...values.map((v, i) => `${x(i)},${y(v)}`), `${x(n - 1)},${y(0)}`]
+      .join(" "),
+    fill: PALETTE[0], "fill-opacity": 0.16,
+  }));
+  f.svg.append(svgNode("polyline", {
+    points: values.map((v, i) => `${x(i)},${y(v)}`).join(" "),
+    fill: "none", stroke: PALETTE[0], "stroke-width": 1.8,
+  }));
+
+  xLabels(f, chart.periods.map((d) => String(d).slice(0, 7)), 6);
+  host.append(el("div", { class: "chart-stats" }, [
+    el("span", { text: `first ${format(values[0])}` }),
+    el("span", { text: `last ${format(values[n - 1])}` }),
+    el("span", { text: `peak ${format(Math.max(...values))}` }),
+  ]));
+}
+
+function renderStacked(host, chart) {
+  if (!chart.series?.length) return empty(host, "nothing to stack");
+  const f = frame(host);
+  const n = chart.periods.length;
+  gridlines(f, 1, (v) => `${(v * 100).toFixed(0)}%`);
+
+  const x = (i) => f.pad.l + (n === 1 ? f.innerW / 2 : (i / (n - 1)) * f.innerW);
+  const y = (v) => f.pad.t + f.innerH - v * f.innerH;
+
+  // Bottom up, so the largest band sits on the axis and the eye reads the small
+  // ones against a flat edge rather than a moving one.
+  const floors = new Array(n).fill(0);
+  chart.series.forEach((series, index) => {
+    const tops = series.values.map((v, i) => floors[i] + v);
+    const points = [
+      ...tops.map((v, i) => `${x(i)},${y(v)}`),
+      ...floors.map((v, i) => `${x(n - 1 - i)},${y(floors[n - 1 - i])}`),
+    ];
+    f.svg.append(svgNode("polygon", {
+      points: points.join(" "),
+      fill: PALETTE[index % PALETTE.length], "fill-opacity": 0.75,
+    }));
+    tops.forEach((v, i) => { floors[i] = v; });
+  });
+
+  xLabels(f, chart.periods.map((d) => String(d).slice(0, 7)), 6);
+  legend(host, chart.series.map((s, i) => [s.label, PALETTE[i % PALETTE.length]]));
+}
+
+function renderCategoryBar(host, chart) {
+  const shown = chart.categories.slice(0, 12);
+  if (!shown.length) return empty(host, "no categories");
+  const format = axisFormat(chart.unit);
+  // Wide left margin for the category names, and room on the right for the
+  // share printed at the end of each bar.
+  const f = frame(host, { pad: { t: 14, r: 62, b: 24, l: 132 } });
+  const peak = Math.max(...chart.values) * 1.05 || 1;
+
+  const rowHeight = f.innerH / shown.length;
+  shown.forEach((label, i) => {
+    const width = (chart.values[i] / peak) * f.innerW;
+    const top = f.pad.t + i * rowHeight + rowHeight * 0.18;
+    const height = rowHeight * 0.64;
+    f.svg.append(svgNode("rect", {
+      x: f.pad.l, y: top, width: Math.max(width, 1), height,
+      fill: PALETTE[0], "fill-opacity": 0.8, rx: 2,
+    }));
+    f.svg.append(svgNode("text", {
+      x: f.pad.l - 8, y: top + height / 2 + 4, "text-anchor": "end",
+      class: "tick", text: label.length > 18 ? `${label.slice(0, 17)}…` : label,
+    }));
+    f.svg.append(svgNode("text", {
+      x: f.pad.l + Math.max(width, 1) + 6, y: top + height / 2 + 4,
+      class: "tick", text: `${(chart.shares[i] * 100).toFixed(1)}%`,
+    }));
+  });
+  host.append(el("div", { class: "chart-stats" }, [
+    el("span", { text: `${chart.categories.length} categories` }),
+    el("span", { text: `largest ${(chart.shares[0] * 100).toFixed(1)}%` }),
+    el("span", { text: `as of ${String(chart.as_of).slice(0, 10)}` }),
+  ]));
+}
+
+function renderHistogram(host, chart) {
+  if (!chart.counts?.length) return empty(host, "no values to spread");
+  const f = frame(host);
+  const peak = Math.max(...chart.counts) * 1.05 || 1;
+  gridlines(f, peak, (v) => fmt.int(v));
+  const n = chart.counts.length;
+  const x = (i) => f.pad.l + (i / n) * f.innerW;
+  const y = (v) => f.pad.t + f.innerH - (v / peak) * f.innerH;
+  chart.counts.forEach((count, i) => {
+    f.svg.append(svgNode("rect", {
+      x: x(i) + 1, y: y(count), width: Math.max(f.innerW / n - 2, 1),
+      height: f.pad.t + f.innerH - y(count), fill: PALETTE[0], "fill-opacity": 0.75,
+    }));
+  });
+  xLabels(f, chart.edges.slice(0, -1).map((e) => Number(e).toFixed(0)), 7);
+}
+
