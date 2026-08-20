@@ -609,20 +609,39 @@ def build_spec(
     long before a tape is exhausted, so a caller with someone waiting — the web
     UI — can bound the wait without meaningfully changing the answer.
     """
-    from sdd.profile.profiler import profile_dataset
+    import pandas as pd
+
+    from sdd.profile.profiler import profile_dataset, read_sample
     from sdd.profile.template import load_template
 
     tmpl = load_template(structure) if isinstance(structure, str) else structure
 
+    # Read once, here, rather than letting `profile_dataset` open the file
+    # itself. Group detection counts rows — how many facilities each obligor
+    # carries, how many arrive later belonging to a borrower already on the book
+    # — so it needs the frame, not a path to one.
+    #
+    # Passing the caller's argument straight through looked equivalent and was
+    # not: every test hands over a DataFrame, while the web and CLI paths hand
+    # over a `Path`. Group detection skipped itself on exactly the two routes a
+    # user takes, and did so silently, because a spec with no groups is a
+    # perfectly valid spec. Caught on the deployed Space, against a tape the
+    # detector handles correctly in memory.
+    #
+    # Reading here also means one read instead of two, and the same `max_rows`
+    # cap over both — so the group shape is measured on the rows that were
+    # profiled rather than on a longer tape nothing else saw.
+    frame = data if isinstance(data, pd.DataFrame) else read_sample(data, max_rows=max_rows)
+
     profile = profile_dataset(
-        data,
+        frame,
         id_column=id_column,
         time_column=time_column,
         state_column=state_column,
         max_rows=max_rows,
     )
     spec = spec_from_profile(
-        profile, template=tmpl, name=name, periods=periods, data=data, **kwargs
+        profile, template=tmpl, name=name, periods=periods, data=frame, **kwargs
     )
     return spec, profile
 
