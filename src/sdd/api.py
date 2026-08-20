@@ -103,6 +103,39 @@ def list_packs() -> list[str]:
     return [p.stem for p in sorted(directory.glob("*.yaml"), key=sort_key)]
 
 
+# A pack failing to load with "extra inputs are not permitted" almost always
+# means one thing: the process is older than the files. Python imports the spec
+# model once at start-up and reads the pack YAML from disk on every request, so
+# pulling a change that adds a field leaves a running server rejecting its own
+# bundled packs — and the message it produces talks about pydantic rather than
+# about restarting.
+_STALE_MARKERS = ("extra inputs are not permitted", "extra_forbidden")
+
+RESTART_HINT = (
+    "This looks like a server started before the packs changed. Python loads the "
+    "spec model once at start-up and re-reads the pack files on every request, so a "
+    "running process rejects fields added after it booted. Restart it."
+)
+
+
+def pack_problems() -> dict[str, list[str]]:
+    """Bundled packs that will not load, and why.
+
+    Empty when everything is healthy. Checked at start-up and reported through
+    the API, because the alternative is a picker that lists a pack and refuses
+    to open it.
+    """
+    problems: dict[str, list[str]] = {}
+    for name in list_packs():
+        result = check(name)
+        if not result["valid"]:
+            reasons = list(result["problems"])
+            if any(marker in " ".join(reasons).lower() for marker in _STALE_MARKERS):
+                reasons.append(RESTART_HINT)
+            problems[name] = reasons
+    return problems
+
+
 def pack_path(name: str) -> Path | None:
     candidate = packs_dir() / f"{Path(name).stem}.yaml"
     return candidate if candidate.exists() else None

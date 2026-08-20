@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -143,6 +144,9 @@ def meta() -> dict[str, Any]:
         "schema_formats": sorted({s.lstrip(".") for s in SCHEMA_SUFFIXES}),
         "sample_formats": sorted({s.lstrip(".") for s in SAMPLE_SUFFIXES}),
         "shared": SHARED,
+        # Packs that will not load. The picker shows them as unavailable with
+        # the reason, rather than listing something that fails when clicked.
+        "pack_problems": api.pack_problems(),
         "limits": {
             "records": MAX_RECORDS,
             "periods": MAX_PERIODS,
@@ -159,6 +163,9 @@ def get_pack(name: str) -> dict[str, Any]:
         spec = api.load(name)
     except api.SddError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        problems = api.pack_problems().get(name) or [str(exc)]
+        raise HTTPException(400, f"{name} could not be loaded. " + " ".join(problems)) from exc
     payload = spec.model_dump(mode="json", exclude_none=True, by_alias=True)
     return {
         "spec": payload,
@@ -941,4 +948,28 @@ def serve(host: str = "127.0.0.1", port: int = 8000, *, reload: bool = False) ->
     """Run the UI. Binds to localhost only unless told otherwise."""
     import uvicorn
 
+    _report_pack_problems()
     uvicorn.run("sdd.web.app:app" if reload else app, host=host, port=port, reload=reload)
+
+
+def _report_pack_problems() -> None:
+    """Say, before anything else, if a bundled pack will not load.
+
+    Silence here is what made the failure so hard to place: the picker listed a
+    pack, clicking it returned a 500, and the only clue was a pydantic message
+    in a log about extra inputs. Whatever the cause, the person starting the
+    server should hear it from the server.
+    """
+    problems = api.pack_problems()
+    if not problems:
+        return
+
+    print("\n  One or more bundled packs will not load:\n", file=sys.stderr)
+    for name, reasons in problems.items():
+        print(f"    {name}", file=sys.stderr)
+        for reason in reasons:
+            print(f"      - {reason}", file=sys.stderr)
+    print(
+        "\n  The interface will show these as unavailable rather than failing when clicked.\n",
+        file=sys.stderr,
+    )
