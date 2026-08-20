@@ -367,6 +367,35 @@ def test_a_rule_cannot_be_learned_from_a_panel_without_the_event(clo):
     assert matured["facility_id"].nunique() < ENTITIES * 0.05
 
 
+def test_a_path_finds_the_same_structure_as_a_frame(clo, tmp_path):
+    """The route a user actually takes must not lose the group.
+
+    Every test above hands `build_spec` a DataFrame. The web UI and the CLI hand
+    it a `Path`, and group detection — alone among the passes, because it counts
+    rows rather than summarising columns — checked for a frame and silently did
+    nothing when it got a path. Silently, because a spec with no groups is a
+    perfectly valid spec.
+
+    Caught on the deployed Space against a tape the detector handles correctly
+    in memory, which is the only reason it was caught at all.
+    """
+    csv = tmp_path / "tape.csv"
+    clo["panel"].to_csv(csv, index=False)
+
+    from_path, _ = build_spec(
+        csv,
+        name="from_path",
+        id_column="facility_id",
+        time_column="reporting_date",
+        state_column="credit_state",
+    )
+
+    assert [g.key for g in from_path.groups] == [g.key for g in clo["spec"].groups]
+    assert [c.name for c in from_path.groups[0].columns] == [
+        c.name for c in clo["spec"].groups[0].columns
+    ]
+
+
 def _hazard_to(spec, state: str):
     """The hazard that sends entities to a state."""
     for hazard in spec.lifecycle.hazards:
