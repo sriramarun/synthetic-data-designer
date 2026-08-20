@@ -147,6 +147,115 @@ def detect_state_column(df: pd.DataFrame, profile: DatasetProfile) -> str | None
 # ---------------------------------------------------------------------------
 
 
+def learn_exits(
+    ordered: pd.DataFrame,
+    id_column: str,
+    time_column: str,
+    state_column: str,
+    terminal: list[str],
+    absorbing: list[str],
+    periods_per_year: float,
+) -> list[dict[str, Any]]:
+    """How entities leave the pool, one rule per terminal state.
+
+    The transition matrix covers the states an entity sits in; leaving is a
+    hazard, and until now only two were ever emitted — one flat rate into the
+    first terminal state and one write-off delay, fixed at nine periods whatever
+    the data said. A book with four ways out came back with two of them
+    unreachable, and the loader rightly refused the spec.
+
+    Each terminal state gets its own rule, and which *kind* is decided by the
+    evidence rather than by position in a list:
+
+    *A fixed delay* looks like a spike. Entities write off after nine months in
+    default, near enough every time, so the time spent in the source state
+    before the move clusters on one value.
+
+    *A flat chance* looks like a decay. A loan can prepay in any month, so the
+    time before it does is spread thin across many values.
+    """
+    exits: list[dict[str, Any]] = []
+    if not terminal:
+        return exits
+
+    frame = ordered[[id_column, time_column, state_column]].copy()
+    frame["_next"] = frame.groupby(id_column)[state_column].shift(-1)
+
+    # How many consecutive periods an entity has been in its current state.
+    same = frame[state_column].eq(frame.groupby(id_column)[state_column].shift())
+    run_id = (~same).cumsum()
+    frame["_dwell"] = frame.groupby([id_column, run_id]).cumcount() + 1
+
+    live = frame[~frame[state_column].isin(terminal)]
+    at_risk = len(live)
+    if not at_risk:
+        return exits
+
+    for state in terminal:
+        moves = live[live["_next"] == state]
+        if moves.empty:
+            continue
+
+        sources = moves[state_column].value_counts()
+        dominant = str(sources.index[0])
+        dominant_share = float(sources.iloc[0] / sources.sum())
+
+        dwell = moves["_dwell"].value_counts()
+        modal_dwell = int(dwell.index[0])
+        modal_share = float(dwell.iloc[0] / dwell.sum())
+
+        # A spike in the dwell distribution, from one source state, is a delay.
+        # Both conditions matter: a flat hazard out of a rare state can look
+        # spiky by accident, and a genuine delay always comes from one place.
+        if modal_dwell > 1 and modal_share > 0.55 and dominant_share > 0.7:
+            exits.append(
+                {
+                    "kind": "dwell_time",
+                    "name": f"to_{_slug(state)}",
+                    "from_state": dominant,
+                    "to_state": state,
+                    # +1: `moves` holds the last row *in* the source state, whose
+                    # dwell counter reads one short of the period the hazard
+                    # fires on. Feeding the raw modal value back would shorten
+                    # every workout by a month on each round trip.
+                    "periods": modal_dwell + 1,
+                    "evidence": f"{len(moves)} moves, {modal_share:.0%} after "
+                    f"{modal_dwell + 1} periods in {dominant!r}",
+                }
+            )
+            continue
+
+        # Otherwise a flat per-period chance, measured over the entities that
+        # could have made the move rather than over every row in the panel.
+        eligible = live
+        if state in _reachable_only_from(moves, state_column):
+            eligible = live[live[state_column].isin(sources.index)]
+        rate = len(moves) / max(len(eligible), 1)
+        annual = 1.0 - (1.0 - min(rate, 0.99)) ** periods_per_year
+        exits.append(
+            {
+                "kind": "bernoulli",
+                "name": f"to_{_slug(state)}",
+                "annual_rate": round(min(annual, 0.99), 6),
+                "to_state": state,
+                "excluded_states": [s for s in absorbing if s not in sources.index],
+                "evidence": f"{len(moves)} moves out of {len(eligible):,} at-risk observations",
+            }
+        )
+
+    return exits
+
+
+def _reachable_only_from(moves: pd.DataFrame, state_column: str) -> set[str]:
+    """States whose exits all come from a single source."""
+    counts = moves[state_column].value_counts()
+    return set(counts.index[:1]) if len(counts) == 1 else set()
+
+
+def _slug(value: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value)).strip("_")
+
+
 def learn_lifecycle(
     ordered: pd.DataFrame, id_column: str, time_column: str, state_column: str
 ) -> dict[str, Any] | None:
@@ -244,6 +353,15 @@ def learn_lifecycle(
         "initial_distribution": {
             str(k): round(float(v), 6) for k, v in initial.div(initial.sum()).items()
         },
+        "exits": learn_exits(
+            ordered,
+            id_column,
+            time_column,
+            state_column,
+            [str(s) for s in terminal],
+            [str(s) for s in absorbing],
+            periods_per_year=12.0,
+        ),
         "low_evidence_states": [str(s) for s in thin],
         "state_order_note": (
             "states are ordered by their share of the first cut-off, as a proxy for severity; "

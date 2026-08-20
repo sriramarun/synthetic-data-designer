@@ -14,7 +14,7 @@ engine as it stands at `a177797`.
 | **1a** | Condition hazard: loans reach the end of their term | ✅ done |
 | **1b** | The CLO pack — 56 columns, 8 states, 40 invariants | ✅ done |
 | **2** | Aggregate targets — the portfolio has a size | ✅ done |
-| **3** | Obligor grouping — one company, many facilities | next |
+| **3** | Obligor grouping — one company, many facilities | ✅ done (profiler half outstanding) |
 | **4** | The standard report — 19 per-period portfolio metrics | |
 | **5** | CLO charts — metadata-driven, built on phase 4 | |
 | **6** | Release — deploy, docs, screenshots, release tests | |
@@ -315,6 +315,36 @@ unchanged with screenshots compared; no `if pack == "clo"` in the UI (§18).
 Space, not just locally; deployed *from `main`*, after merge.
 
 ---
+
+
+## Profiler catch-up
+
+The profiler reads a real tape and writes the spec that would reproduce it. That
+backward direction has fallen behind the spec model: every feature added since
+Phase 1 is something it cannot read back.
+
+This was written down as a single ~1.5-week item attached to Phase 3. That was
+wrong, and measurably so — the piece that breaks the product is not the piece
+that was scheduled. Tested by adding each half by hand to a relearned CLO spec:
+
+| Added by hand | Relearned spec valid? |
+|---|---|
+| nothing | ✗ |
+| **groups** — exactly the Phase 3 leftover | ✗ **still broken** |
+| **exit hazards**, no groups | ✓ **fixed** |
+
+It is four separate pieces, and only one of them belongs to Phase 3.
+
+| Piece | Effect if missing | Size | Status |
+|---|---|---|---|
+| **Exit hazards** — how entities leave | `/api/analyse` returns 500 on any tape where loans are sold, mature or recover | ~3 days | ✅ **done** |
+| **Groups** | obligor structure discarded; a relearned tape has one company per facility | ~1.5 wk | Phase 3 leftover |
+| **Targets** | portfolio size not recorded; regenerating at another scale lands anywhere | ~2 days | not scheduled |
+| **Condition hazards** | maturity comes back as a flat monthly chance — reachable, but a different rule | ~3 days | not scheduled |
+
+**Also found and not fixed:** the auto pack relearns to a *valid* spec that then
+fails to generate — `could not convert string to float: 'Fixed'`. Confirmed
+pre-existing, independent of the above, and a separate dtype-inference bug.
 
 ## Working agreements
 
