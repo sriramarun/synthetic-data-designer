@@ -165,6 +165,15 @@ def explain_problems(error: Exception) -> list[str]:
     return problems or [str(error).strip() or "the spec could not be validated"]
 
 
+def _plural_noun(meta: Any) -> str | None:
+    """The plural the interface should use, or None to let it fall back."""
+    from sdd.spec.schema import plural_of
+
+    if meta.entity_noun_plural:
+        return meta.entity_noun_plural
+    return plural_of(meta.entity_noun) if meta.entity_noun else None
+
+
 def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
     """Validate a spec and report problems as data rather than an exception."""
     from sdd.spec import SpecError
@@ -183,6 +192,8 @@ def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
             "regulatory_template": loaded.meta.regulatory_template,
             "asset_class": loaded.meta.asset_class,
             "featured": loaded.meta.featured,
+            "entity_noun": loaded.meta.entity_noun,
+            "entity_noun_plural": _plural_noun(loaded.meta),
             "hash": spec_hash(loaded),
             "columns": len(loaded.output_columns()),
             "periods": loaded.entity.calendar.periods,

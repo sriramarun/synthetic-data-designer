@@ -706,7 +706,20 @@ function renderGroupStates() {
 /* The word for one row of the opening book. "Rows" was wrong and actively
  * misleading: the field has always held entities, and the note underneath said
  * so while the label above it said otherwise. */
+/* What this pack calls one row of its opening book.
+ *
+ * The spec says so — `meta.entity_noun` — because the pack knows and the
+ * browser does not. This used to match substrings of `asset_class` here, which
+ * meant a pack could not name itself: anything the list did not recognise was a
+ * loan, so a buy-now-pay-later plan and a trade receivable were both "loans"
+ * and no pack author could do anything about it.
+ *
+ * The old guesses survive as a fallback, for a spec profiled from a tape rather
+ * than written by hand — which has an asset class and no vocabulary. */
 function entityNoun() {
+  const declared = state.summary?.entity_noun_plural || state.spec?.meta?.entity_noun_plural;
+  if (declared) return declared;
+
   const asset = (state.spec?.meta?.asset_class || "").toLowerCase();
   if (asset.includes("clo") || asset.includes("leveraged")) return "facilities";
   if (asset.includes("card")) return "accounts";
@@ -1386,7 +1399,7 @@ async function renderResults(result) {
   $("#run-stats").replaceChildren(...[
     stat("Rows generated", fmt.int(rows)),
     stat("Columns", fmt.int(state.summary?.columns ?? state.spec.columns.length)),
-    stat("Entities", fmt.int(total)),
+    stat(cap(entityNoun()), fmt.int(total)),
     originated ? stat("Written later", fmt.int(originated)) : null,
     stat("Periods", fmt.int(result.periods)),
     // Survival is measured against everything that ever entered the pool, not
