@@ -156,9 +156,25 @@ const NEXT_LABEL = {
 
 function reach(view) { state.reachable[view] = true; }
 
+/* What each screen is for, said on arrival.
+ *
+ * The status bar held whatever the last action set, so three screens into a
+ * run it still read "Review its schema, or go straight to configuring" — advice
+ * about a screen already behind you. A caller with something more specific to
+ * say still overrides it by calling status() afterwards. */
+const VIEW_STATUS = {
+  upload: "Pick a calibrated pack, or upload a schema of your own.",
+  review: "Check the detected types and key. Change anything that looks wrong.",
+  configure: "Two sections are open. The rest have working defaults — press Generate when ready.",
+  generate: "Running. This takes seconds for a small pool and minutes for a large one.",
+  results: "Charts and a queryable table. Download comes next.",
+  download: "Five formats, plus the configuration that produced them.",
+};
+
 function show(view) {
   state.view = view;
   VIEWS.forEach((name) => { $(`#view-${name}`).hidden = name !== view; });
+  if (VIEW_STATUS[view]) status(VIEW_STATUS[view]);
 
   const at = VIEWS.indexOf(view);
   $$(".rail .step").forEach((button) => {
@@ -427,7 +443,7 @@ async function choosePack(name, info) {
   reach("configure");
   renderReview();
   show("review");
-  status(`Loaded ${info.summary.title}. Review its schema, or go straight to configuring.`);
+  status(`Loaded ${info.summary.title}. Check the detected types, or go straight to configuring.`);
 }
 
 /* -------------------------------------------------------------- 2. review */
@@ -446,6 +462,14 @@ function seedSettings(spec, capabilities) {
   s.prepayment_rate = rates.prepayment_rate;
   s.recovery_rate = rates.recovery_rate;
   s.origination_rate = spec.originations?.rate ?? 0;
+
+  // A pack that states the size it was calibrated for opens at that size.
+  // The CLO pack aims at EUR 500m across 500 facilities and the box defaulted
+  // to 10,000, so loading it and pressing Generate produced a EUR 10bn
+  // portfolio — arithmetically correct and not the thing the pack describes.
+  const declared = (spec.entity?.targets || []).find((t) => t.entities)?.entities;
+  if (declared) s.records = declared;
+
   s.touched = new Set();
 }
 
@@ -627,6 +651,91 @@ function renderConfigure() {
   renderAging();
   renderColumns();
   refreshYaml();
+  renderGroupStates();
+}
+
+/* What each collapsed group currently holds.
+ *
+ * A tab hides its contents behind a click and says nothing about them, so the
+ * only way to know whether a setting mattered was to open all six. A line of
+ * state on the summary turns an unopened group into an answered question. */
+function renderGroupStates() {
+  const s = state.settings;
+  const caps = state.capabilities || {};
+  const spec = state.spec;
+
+  const set = (id, text, changed) => {
+    const host = $(id);
+    if (!host) return;
+    host.textContent = text;
+    host.classList.toggle("changed", Boolean(changed));
+  };
+
+  const noun = entityNoun();
+  set("#state-essentials",
+      `${fmt.int(s.records)} ${noun} · ${s.periods} × ${freqLabel(s.freq)}` +
+      (s.scenario ? ` · ${s.scenario}` : ""),
+      s.scenario);
+
+  const rates = ["default_rate", "prepayment_rate", "recovery_rate"].filter((k) => s.touched.has(k));
+  set("#state-behaviour",
+      caps.ageing
+        ? (rates.length ? `${rates.length} rate${rates.length > 1 ? "s" : ""} changed`
+                        : "calibrated defaults")
+        : "no lifecycle — single snapshot",
+      rates.length);
+
+  const knobs = Object.entries(s.randomness || {}).filter(([, v]) => Number(v) > 0);
+  const method = (spec.generation || {}).method || "distribution";
+  set("#state-realism",
+      `${method.replace("_", " ")}` +
+      (knobs.length ? ` · ${knobs.length} knob${knobs.length > 1 ? "s" : ""} on` : " · no noise"),
+      knobs.length);
+
+  set("#state-columns", `${outputColumnCount()} columns`, false);
+  set("#state-document", caps.ageing ? `${(caps.states || []).length} states` : "no lifecycle",
+      false);
+}
+
+/* The word for one row of the opening book. "Rows" was wrong and actively
+ * misleading: the field has always held entities, and the note underneath said
+ * so while the label above it said otherwise. */
+function entityNoun() {
+  const asset = (state.spec?.meta?.asset_class || "").toLowerCase();
+  if (asset.includes("clo") || asset.includes("leveraged")) return "facilities";
+  if (asset.includes("card")) return "accounts";
+  if (asset.includes("lease")) return "leases";
+  return "loans";
+}
+
+function freqLabel(freq) {
+  return {
+    day: "daily",
+    week_end: "weekly",
+    fortnight_end: "fortnightly",
+    month_end: "monthly",
+    month_start: "monthly",
+    quarter_end: "quarterly",
+    year_end: "annual",
+  }[freq] || "monthly";
+}
+
+/* Columns as they reach the file, which is what every other screen reports.
+ * The review step counted declared columns and the header counted output ones,
+ * so a grouped pack disagreed with itself by the number of group attributes. */
+function outputColumnCount() {
+  const spec = state.spec;
+  if (!spec) return 0;
+  if (spec.emit?.column_order?.length) return spec.emit.column_order.length;
+  const own = (spec.columns || []).filter((c) => c.role !== "helper").map((c) => c.name);
+  const grouped = [];
+  for (const group of spec.groups || []) {
+    grouped.push(group.key);
+    for (const column of group.columns || []) {
+      if (column.role !== "helper") grouped.push(column.name);
+    }
+  }
+  return new Set([...own, ...grouped]).size;
 }
 
 function renderScale() {
@@ -655,17 +764,47 @@ function renderScale() {
   updateSizeNote();
 }
 
+/* One sentence saying what pressing Generate produces.
+ *
+ * Sat at the bottom of a tab before, under the heading "How much data", where
+ * the label said "Rows to generate" and the field held entities. Three
+ * different claims on one screen, and the arithmetic between them is the whole
+ * point: entities times cut-offs is the number that fills a disk. */
 function updateSizeNote() {
   const s = state.settings;
   const periods = s.periods || 1;
-  const columns = state.summary?.columns || state.spec.columns.length;
-  const cells = s.records * periods * columns;
-  $("#cfg-size-note").innerHTML =
-    `About <strong>${fmt.int(s.records * periods)}</strong> rows ` +
-    `(${fmt.int(s.records)} entities × ${periods} periods) across ${columns} columns — ` +
-    `roughly ${fmt.int(cells)} values. Rows leave the pool as they redeem or write off, ` +
-    `so the real count is a little lower.`;
+  const columns = outputColumnCount();
+  const noun = entityNoun();
+  const rows = s.records * periods;
+  const host = $("#cfg-outcome");
+  if (!host) return;
+
+  const limits = state.meta?.limits || {};
+  let warning = "";
+  if (limits.rows && rows > limits.rows) {
+    warning = `<br><span class="bad">This asks for more than the ` +
+      `${fmt.int(limits.rows)} rows this instance allows. Reduce either number.</span>`;
+  }
+
+  host.innerHTML =
+    `<strong>${fmt.int(s.records)}</strong> ${noun} over ` +
+    `<strong>${periods}</strong> ${freqLabel(s.freq)} cut-offs ` +
+    `→ about <strong>${fmt.int(rows)}</strong> rows across ` +
+    `<strong>${columns}</strong> columns.` +
+    `<span class="muted"> ${cap(noun)} leave the pool as they redeem, mature or write off, ` +
+    `so the real count comes in a little under.</span>${warning}`;
+
+  const label = $("#cfg-records-label");
+  if (label) label.textContent = `How many ${noun}`;
+  const sub = $("#cfg-records-sub");
+  if (sub) {
+    sub.textContent = `Each one appears once per cut-off, so the row count is this ` +
+      `times ${periods}.`;
+  }
+  renderGroupStates();
 }
+
+function cap(word) { return word.charAt(0).toUpperCase() + word.slice(1); }
 
 function renderMethods() {
   const host = $("#cfg-methods");
@@ -780,8 +919,15 @@ function renderAging() {
     el("label", { class: "field" }, [
       el("span", { class: "lbl", text: "Frequency" }),
       el("select", {
-        onchange: (e) => { s.freq = e.target.value; s.touched.add("freq"); pushConfigure({}); },
+        onchange: (e) => {
+          s.freq = e.target.value;
+          s.touched.add("freq");
+          updateSizeNote();
+          pushConfigure({});
+        },
       }, [
+        el("option", { value: "week_end", text: "Weekly", selected: s.freq === "week_end" }),
+        el("option", { value: "fortnight_end", text: "Fortnightly", selected: s.freq === "fortnight_end" }),
         el("option", { value: "month_end", text: "Monthly", selected: s.freq === "month_end" }),
         el("option", { value: "quarter_end", text: "Quarterly", selected: s.freq === "quarter_end" }),
         el("option", { value: "year_end", text: "Annually", selected: s.freq === "year_end" }),
@@ -1621,15 +1767,22 @@ function renderBalance(host, chart, why) {
 /* ------------------------------------------------------------------- wire */
 
 function wireTabs() {
-  const tabs = $$("#config-tabs .tab");
-  tabs.forEach((tab) => {
-    tab.onclick = () => {
-      tabs.forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
-      $$(".tabpane").forEach((pane) => {
-        pane.hidden = pane.id !== `tab-${tab.dataset.tab}`;
-      });
-    };
+  /* Which configure groups are open, remembered for the session.
+   *
+   * Opening a group is a statement that you care about it, and re-collapsing it
+   * on every re-render — which happens on every keystroke that touches the
+   * spec — would throw that away and shut the panel a user was reading. */
+  const opened = new Set();
+  $$("details.group").forEach((group) => {
+    if (group.open) opened.add(group.id);
+    group.addEventListener("toggle", () => {
+      if (group.open) opened.add(group.id);
+      else opened.delete(group.id);
+    });
   });
+  state.restoreGroups = () => {
+    $$("details.group").forEach((group) => { group.open = opened.has(group.id); });
+  };
 }
 
 function wireNav() {
