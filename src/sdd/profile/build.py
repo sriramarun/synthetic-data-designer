@@ -27,7 +27,6 @@ from sdd.spec.schema import (
     Counter,
     Derivation,
     DesignSpec,
-    DwellTimeHazard,
     Dynamics,
     Emit,
     Entity,
@@ -329,14 +328,24 @@ def _build_lifecycle(profile: DatasetProfile) -> Lifecycle | None:
     if not learned:
         return None
 
-    hazards: list[Any] = []
-    # Attrition observed in the panel becomes a prepayment-style hazard into the
-    # first terminal state. Where several terminal states exist the split cannot
-    # be recovered from counts alone, so the most common one is used and the
-    # choice is left visible in the spec.
-    attrition = profile.dynamics.get("attrition")
     terminal = learned.get("terminal") or []
-    if attrition and terminal and attrition["annual_rate"] > 0:
+    hazards: list[Any] = []
+
+    # One rule per terminal state, measured from the panel.
+    #
+    # This used to emit exactly two whatever the data held: a flat rate into the
+    # first terminal state and a write-off delay fixed at nine periods. A book
+    # with four ways out came back with two of them unreachable and the loader
+    # refused the whole spec, so any tape where loans are sold, mature or recover
+    # from default could not be profiled into anything runnable.
+    for exit_rule in learned.get("exits") or []:
+        rule = {k: v for k, v in exit_rule.items() if k != "evidence"}
+        hazards.append(rule)
+
+    # Nothing learned, but entities clearly leave: fall back to the attrition
+    # rate rather than emit a lifecycle nothing can exit.
+    attrition = profile.dynamics.get("attrition")
+    if not hazards and attrition and terminal and attrition["annual_rate"] > 0:
         hazards.append(
             {
                 "kind": "bernoulli",
@@ -345,17 +354,6 @@ def _build_lifecycle(profile: DatasetProfile) -> Lifecycle | None:
                 "to_state": terminal[0],
                 "excluded_states": list(learned.get("absorbing", [])),
             }
-        )
-    # A second terminal state reached from an absorbing one is the charge-off
-    # shape: entities sit in default, then write off after a fixed delay.
-    if len(terminal) > 1 and learned.get("absorbing"):
-        hazards.append(
-            DwellTimeHazard(
-                name="writeoff",
-                from_state=learned["absorbing"][0],
-                to_state=terminal[1],
-                periods=9,
-            )
         )
 
     return Lifecycle(
