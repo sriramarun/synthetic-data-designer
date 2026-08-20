@@ -18,9 +18,14 @@ loans paying down, falling behind, prepaying, defaulting.
 
 A six-step wizard: **Upload → Review → Configure → Generate → Results → Download**.
 
-Two calibrated packs are bundled, so you can see the whole thing work without
+Three calibrated packs are bundled, so you can see the whole thing work without
 uploading anything:
 
+- **European CLO — Leveraged Loans** (56 columns) — start here. An open
+  portfolio of European corporate loans that trades: bullet repayment, credit
+  migration through watchlist and distress, a nine-month workout after default,
+  new collateral bought throughout a reinvestment period, and credit ratings
+  that migrate on their own chain rather than being read off the credit state
 - **Dutch Green Loans — Residential Mortgages** (ESMA Annex 2, 71 columns)
 - **European Auto Loans — ESMA Annex 5** (44 columns, depreciating collateral,
   balloon payments, recovery on write-off)
@@ -49,10 +54,15 @@ Source: <https://github.com/sriramarun/synthetic-data-designer>
 
 | | |
 |---|---|
-| Rows per run | 50,000 |
+| Loans per run | 50,000 |
 | Periods | 60 |
+| Rows of output | 3,000,000 |
 | Upload size | 50 MB |
 | CTGAN / Hybrid methods | unavailable — they need PyTorch, which is too large and too slow for a basic CPU Space |
+
+A loan is one contract; a **row** is one loan at one cut-off. 50,000 loans over
+60 periods comes to roughly 2.5 million rows, which is why both are quoted —
+either one alone would misstate what you get.
 
 Run it locally for anything bigger. There are no limits there.
 
@@ -64,6 +74,11 @@ Run it locally for anything bigger. There are no limits there.
   tabular model, each written into the configuration as generators you can read
 - **Ages** the portfolio forward with amortisation, indices, arrears, defaults,
   recoveries, and optionally new loans written during the window
+- **Groups** entities under a shared parent where the data has one — several
+  facilities behind a single obligor, several mortgages behind one household —
+  so concentration means something
+- **Migrates** a second state machine alongside the first, which is how a credit
+  rating drifts while a loan is still performing rather than only when it is not
 - **Validates** the result against invariants derived from the configuration
   itself, and shows you every check
 - **Exports** CSV, Parquet, Excel, the configuration as YAML, and a standalone
