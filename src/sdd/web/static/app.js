@@ -248,14 +248,23 @@ async function validate() {
     ? `valid · ${state.summary.columns} cols · ${state.summary.periods}p`
     : `${state.problems.length} problem(s)`;
 
-  const host = $("#config-problems");
-  host.replaceChildren();
-  if (!state.valid) {
-    host.append(note(
-      `<strong>This configuration will not run.</strong><ul>${
+  // The count went in the header, which every screen shows, while the reason
+  // went into a panel only the configure screen has. So a spec that failed
+  // while you were still on upload reported "1 problem(s)" and no way to find
+  // out which — a number you can neither act on nor dismiss.
+  const detail = !state.valid
+    ? note(`<strong>This configuration will not run.</strong><ul>${
         state.problems.slice(0, 8).map((p) => `<li>${escapeHtml(p)}</li>`).join("")
-      }</ul>`, "bad", true));
+      }</ul>`, "bad", true)
+    : null;
+
+  for (const id of ["#config-problems", "#upload-error"]) {
+    const host = $(id);
+    if (!host) continue;
+    if (detail) host.replaceChildren(detail.cloneNode(true));
+    else if (id === "#config-problems") host.replaceChildren();
   }
+  tag.title = state.valid ? "" : state.problems.join("\n");
   if (state.view === "configure") $("#btn-next").disabled = !state.valid;
   return state.valid;
 }
@@ -408,7 +417,7 @@ async function loadPacks() {
     const summary = info.summary;
     list.append(el("button", {
       class: summary.featured ? "pack featured" : "pack",
-      onclick: () => choosePack(name, info),
+      onclick: () => loadPack(name, info),
     }, [
       el("span", { class: "pack-text" }, [
         el("div", { class: "name" }, [
@@ -431,6 +440,25 @@ async function loadPacks() {
       el("code", { class: "pack-id", text: name }),
       el("span", { class: "badge req", text: "Load" }),
     ]));
+  }
+}
+
+/* Loading a pack is asynchronous and used to be fired and forgotten.
+ *
+ * `onclick: () => choosePack(...)` returns a promise nobody holds, so anything
+ * that threw inside became an unhandled rejection: a line in a console the user
+ * is not looking at, and an interface that simply did not respond. "The button
+ * does not work" is what that looks like from the outside, and it is the one
+ * failure mode with no way to report itself. */
+async function loadPack(name, info) {
+  try {
+    await choosePack(name, info);
+  } catch (error) {
+    $("#upload-error").replaceChildren(note(
+      `<strong>${escapeHtml(info?.summary?.title || name)} could not be loaded.</strong>` +
+      `<br>${escapeHtml(error.message || String(error))}`, "bad", true));
+    status(`${name} could not be loaded.`, "bad");
+    show("upload");
   }
 }
 
