@@ -406,9 +406,15 @@ async function loadPacks() {
   for (const name of meta.packs) {
     const info = await call(`/api/packs/${name}`);
     const summary = info.summary;
-    list.append(el("button", { class: "pack", onclick: () => choosePack(name, info) }, [
+    list.append(el("button", {
+      class: summary.featured ? "pack featured" : "pack",
+      onclick: () => choosePack(name, info),
+    }, [
       el("span", { class: "pack-text" }, [
-        el("div", { class: "name", text: summary.title }),
+        el("div", { class: "name" }, [
+          el("span", { text: summary.title }),
+          summary.featured ? el("span", { class: "star", text: "Start here" }) : null,
+        ].filter(Boolean)),
         summary.regulatory_template
           ? el("div", { class: "m", text: summary.regulatory_template })
           : null,

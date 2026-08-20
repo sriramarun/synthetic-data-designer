@@ -29,26 +29,31 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:      #131316;
-    --panel:   #1b1b1f;
-    --panel-2: #202026;
-    --ink:     #ececf0;
-    --ink-2:   #a6a6b0;
-    --ink-3:   #74747e;
-    --line:    #2d2d34;
-    --line-2:  #26262c;
-    --accent:  #6fbfa5;
-    --accent-2:#1d2b28;
-    --good:    #6cc08a;
-    --good-bg: #17281d;
-    --warn:    #d9a441;
-    --warn-bg: #2a2216;
-    --bad:     #e0796c;
-    --bad-bg:  #2c1a18;
-    --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 22px -14px rgba(0, 0, 0, .8);
-  }
+/* Dark is available and no longer automatic.
+ *
+ * Behind `prefers-color-scheme` the page followed the operating system, so the
+ * same build looked like two different products depending on whose machine it
+ * was opened on — and the screenshots in the user guide, captured in light,
+ * matched neither for anyone running a dark desktop. Light is the design; dark
+ * is opt-in by setting `data-theme="dark"` on the root element. */
+:root[data-theme="dark"] {
+  --bg:      #131316;
+  --panel:   #1b1b1f;
+  --panel-2: #202026;
+  --ink:     #ececf0;
+  --ink-2:   #a6a6b0;
+  --ink-3:   #74747e;
+  --line:    #2d2d34;
+  --line-2:  #26262c;
+  --accent:  #6fbfa5;
+  --accent-2:#1d2b28;
+  --good:    #6cc08a;
+  --good-bg: #17281d;
+  --warn:    #d9a441;
+  --warn-bg: #2a2216;
+  --bad:     #e0796c;
+  --bad-bg:  #2c1a18;
+  --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 22px -14px rgba(0, 0, 0, .8);
 }
 
 * { box-sizing: border-box; }
@@ -539,3 +544,41 @@ details.group > summary:focus-visible { outline: 2px solid var(--accent); outlin
   border-top: 1px solid var(--line);
 }
 .g-body > .sub-head:first-child { margin-top: 12px; padding-top: 0; border-top: 0; }
+
+/* ------------------------------------------------------------ featured pack
+   One pack is the one to try first. Marked with its own colour rather than the
+   accent, because the accent already means "this is the action" all over the
+   page and reusing it here would say only that a pack is a button. */
+
+:root {
+  --feature:    #6b4fa8;
+  --feature-bg: #f3effa;
+  --feature-line: #d6c9ef;
+}
+:root[data-theme="dark"] {
+  --feature:    #b49ce8;
+  --feature-bg: #221c30;
+  --feature-line: #3b3054;
+}
+
+.pack.featured {
+  background: var(--feature-bg);
+  border-color: var(--feature-line);
+}
+.pack.featured:hover { border-color: var(--feature); }
+.pack.featured .name { color: var(--feature); }
+
+.pack .name { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.pack .star {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--feature);
+  border: 1px solid var(--feature-line);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}

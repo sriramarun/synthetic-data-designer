@@ -77,10 +77,30 @@ def packs_dir() -> Path:
 
 
 def list_packs() -> list[str]:
+    """Bundled packs, in the order they should be offered.
+
+    `meta.display_order` first, then everything else alphabetically. Sorting by
+    filename alone put the packs in an order nobody chose, and the top of a list
+    is where most people click.
+
+    A pack that will not parse still appears, at the end: the picker is also
+    where you would go to find out something is broken.
+    """
     directory = packs_dir()
     if not directory.is_dir():
         return []
-    return sorted(p.stem for p in directory.glob("*.yaml"))
+
+    import yaml
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        try:
+            meta = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("meta") or {}
+            order = meta.get("display_order")
+        except Exception:
+            order = None
+        return (order if isinstance(order, int) else 10_000, path.stem)
+
+    return [p.stem for p in sorted(directory.glob("*.yaml"), key=sort_key)]
 
 
 def pack_path(name: str) -> Path | None:
@@ -162,6 +182,7 @@ def check(spec: str | Path | dict[str, Any]) -> dict[str, Any]:
             "description": loaded.meta.description,
             "regulatory_template": loaded.meta.regulatory_template,
             "asset_class": loaded.meta.asset_class,
+            "featured": loaded.meta.featured,
             "hash": spec_hash(loaded),
             "columns": len(loaded.output_columns()),
             "periods": loaded.entity.calendar.periods,
