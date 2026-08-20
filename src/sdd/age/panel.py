@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -51,6 +52,88 @@ class AgeingError(RuntimeError):
 
 class RowLimitExceeded(AgeingError):
     """The panel grew past the ceiling it was given and was stopped."""
+
+
+class _Chain:
+    """One secondary chain's state, carried across the ageing loop.
+
+    Holds its own state indices and dwell counters, exactly as the primary
+    lifecycle does. It has to survive the terminal-row cull the same way, or the
+    arrays fall out of step with the frame and every entity is handed some other
+    entity's rating.
+    """
+
+    def __init__(self, spec: Any, engine: LifecycleEngine) -> None:
+        self.spec = spec
+        self.engine = engine
+        self.state = np.zeros(0, dtype=np.int16)
+        self.dwell: dict[str, np.ndarray] = {}
+
+    @property
+    def column(self) -> str:
+        return self.spec.lifecycle.state_column
+
+    def seed(self, df: pd.DataFrame, rng: np.random.Generator) -> None:
+        """Opening states, from the chain's own distribution or its column."""
+        lc = self.spec.lifecycle
+        n = len(df)
+        if lc.initial_distribution:
+            states = list(lc.initial_distribution)
+            weights = np.array([lc.initial_distribution[s] for s in states], dtype=float)
+            labels = rng.choice(states, size=n, p=weights / weights.sum())
+        elif self.column in df.columns:
+            labels = df[self.column].to_numpy()
+        else:
+            labels = np.full(n, lc.states[0])
+        self.state = self.engine.to_idx(np.asarray(labels))
+        self.dwell = self.engine.initial_dwell(n, self.state)
+
+    def keep(self, mask: np.ndarray) -> None:
+        self.state = self.state[mask]
+        self.dwell = {k: v[mask] for k, v in self.dwell.items()}
+
+    def grow(self, n: int, rng: np.random.Generator) -> None:
+        """Seats for entities joining an open pool part-way through."""
+        if n <= 0:
+            return
+        lc = self.spec.lifecycle
+        if lc.initial_distribution:
+            states = list(lc.initial_distribution)
+            weights = np.array([lc.initial_distribution[s] for s in states], dtype=float)
+            labels = rng.choice(states, size=n, p=weights / weights.sum())
+        else:
+            labels = np.full(n, lc.states[0])
+        joined = self.engine.to_idx(np.asarray(labels))
+        self.state = np.concatenate([self.state, joined])
+        fresh = self.engine.initial_dwell(n, joined)
+        self.dwell = {
+            k: np.concatenate([v, fresh.get(k, np.zeros(n, dtype=np.int32))])
+            for k, v in self.dwell.items()
+        } or fresh
+
+    def stress_multipliers(self, n: int) -> np.ndarray | None:
+        """Per-entity multiplier on the primary's worsening transitions."""
+        table = self.spec.coupling.stress
+        if not table or len(self.state) != n:
+            return None
+        by_index = np.ones(len(self.engine.states), dtype=float)
+        for label, multiplier in table.items():
+            by_index[self.engine.index[label]] = float(multiplier)
+        return by_index[self.state]
+
+    def step(self, rng: np.random.Generator) -> None:
+        self.state, self.dwell = self.engine.step(self.state, self.dwell, rng)
+
+    def force(self, primary_labels: np.ndarray) -> None:
+        """Apply the primary state's veto — a defaulted facility is rated D."""
+        for primary_state, forced in self.spec.coupling.forced_by.items():
+            hit = primary_labels == primary_state
+            if hit.any():
+                self.state[hit] = self.engine.index[forced]
+
+    def write(self, df: pd.DataFrame) -> pd.DataFrame:
+        df[self.column] = self.engine.to_label(self.state)
+        return df
 
 
 def run_ageing(
@@ -83,6 +166,13 @@ def run_ageing(
 
     rng = np.random.default_rng(seed)
     engine = LifecycleEngine(spec.lifecycle, spec.entity.calendar.periods_per_year)
+    chains = [
+        _Chain(
+            spec=chain,
+            engine=LifecycleEngine(chain.lifecycle, spec.entity.calendar.periods_per_year),
+        )
+        for chain in spec.secondary_chains
+    ]
     dates = period_dates(spec.entity.calendar)
     lc = spec.lifecycle
 
@@ -92,6 +182,8 @@ def run_ageing(
     current = book.copy().reset_index(drop=True)
     dwell = engine.initial_dwell(len(current), engine.to_idx(current[lc.state_column].to_numpy()))
     accrual_counters = seed_accrual_counters(current, spec.dynamics.accruals, _dpd_column(spec))
+    for chain in chains:
+        chain.seed(current, rng)
 
     written: list[str] = []
     mixes: list[dict] = []
@@ -115,6 +207,7 @@ def run_ageing(
                 current,
                 dwell,
                 accrual_counters,
+                chains=chains,
                 period=period,
                 date=date,
                 rng=rng,
@@ -139,6 +232,8 @@ def run_ageing(
                 )
                 next_index += joined
                 originated += joined
+                for chain in chains:
+                    chain.grow(joined, rng)
 
         out = to_output(spec, current)
 
@@ -185,6 +280,8 @@ def run_ageing(
             current = current.loc[keep].reset_index(drop=True)
             dwell = {k: v[keep] for k, v in dwell.items()}
             accrual_counters = {k: v[keep] for k, v in accrual_counters.items()}
+            for chain in chains:
+                chain.keep(keep)
 
     panel_path = None
     if spec.emit.write_panel and frames and write_files:
@@ -223,6 +320,7 @@ def _step(
     index_shift: dict[str, float],
     recovery_mult: float,
     performing_state: str,
+    chains: list[_Chain] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray]]:
     lc = spec.lifecycle
     assert lc is not None
@@ -231,12 +329,26 @@ def _step(
     # 1. lifecycle
     prev_idx = engine.to_idx(df[lc.state_column].to_numpy())
     condition_masks = _condition_masks(spec, engine, df, period)
+    # Secondary state feeds the primary's odds *before* the primary moves: a
+    # facility already rated CCC is more likely to slip this month, and reading
+    # its rating after the move would apply this month's downgrade to last
+    # month's transition.
+    row_multipliers = None
+    for chain in chains or []:
+        contribution = chain.stress_multipliers(len(df))
+        if contribution is None:
+            continue
+        row_multipliers = (
+            contribution if row_multipliers is None else row_multipliers * contribution
+        )
+
     new_idx, dwell = engine.step(
         prev_idx,
         dwell,
         rng,
         hazard_multipliers=hazard_mult,
         condition_masks=condition_masks,
+        row_multipliers=row_multipliers,
     )
     labels = engine.to_label(new_idx)
     df[lc.state_column] = labels
@@ -296,6 +408,18 @@ def _step(
 
     # 6. forced per-state values — these win over everything computed above
     df = apply_state_fields(spec, df, labels)
+
+    # 6b. secondary chains: migrate, then let the primary state overrule.
+    #
+    # Order is the point. Stepping first lets a rating drift on its own, which
+    # is the whole reason the chain exists — a downgrade normally arrives before
+    # any distress is visible. Forcing second means a facility that defaulted
+    # *this* period is rated D in the row that records the default, rather than
+    # carrying whatever its own chain happened to draw.
+    for chain in chains or []:
+        chain.step(rng)
+        chain.force(labels)
+        df = chain.write(df)
 
     # 7. time column, then per-period derivations that depend on it
     df[spec.entity.time_column] = date.strftime("%Y-%m-%d")

@@ -1246,6 +1246,88 @@ class Validation(_Base):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# secondary chains — a second thing migrating alongside the first
+# ---------------------------------------------------------------------------
+
+
+class ChainCoupling(_Base):
+    """How a secondary chain and the primary lifecycle affect each other.
+
+    Left uncoupled the two are independent, and independence produces nonsense:
+    a facility rated BB sitting in Defaulted, or a D-rated one performing
+    happily. Both directions matter and they are not equally certain.
+
+    ``forced_by`` is the direction with no ambiguity. A defaulted facility *is*
+    rated D — that is what the rating means — so the primary state overwrites
+    the secondary outright.
+
+    ``stress`` is the direction that carries the modelling judgement. A worse
+    rating should make distress more likely, and by how much is a choice rather
+    than a fact. It scales the primary's *worsening* transitions for the
+    entities in that secondary state, using the same reallocation a stress
+    scenario applies globally — so a rating-driven stress and a scenario cannot
+    drift into meaning different things.
+    """
+
+    forced_by: dict[str, str] = Field(
+        default_factory=dict,
+        description="Primary state -> the secondary state it forces, e.g. {Defaulted: D}.",
+    )
+    stress: dict[str, float] = Field(
+        default_factory=dict,
+        description="Secondary state -> multiplier on the primary's worsening transitions for "
+        "entities in it. 1.0 is no effect; 3.0 triples the chance of falling further behind.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> ChainCoupling:
+        for state, multiplier in self.stress.items():
+            if multiplier < 0:
+                raise ValueError(f"stress multiplier for {state!r} is negative")
+        return self
+
+
+class SecondaryChain(_Base):
+    """A second state machine running alongside the lifecycle.
+
+    The lifecycle owns the entity's life: it decides who leaves the pool and
+    when. A secondary chain owns one column and nothing else — it migrates, it
+    is written out each period, and it cannot terminate anything.
+
+    Credit ratings are the case this exists for. A rating moves on its own, and
+    normally moves *before* distress is visible: a company is downgraded from B
+    to B- while paying every instalment on time, and that downgrade is the early
+    warning the rating exists to give. Derived from the credit state instead, as
+    this pack did until now, the rating can only ever agree with what is already
+    obvious, and the CCC share becomes the distressed share under another name.
+    """
+
+    name: str = Field(description="What is migrating, e.g. 'rating'.")
+    lifecycle: Lifecycle = Field(
+        description="The chain itself: its column, its states, its matrix. Reuses the lifecycle "
+        "model, so a chain is validated exactly as the primary one is."
+    )
+    coupling: ChainCoupling = Field(default_factory=ChainCoupling)
+
+    @model_validator(mode="after")
+    def _check(self) -> SecondaryChain:
+        if self.lifecycle.terminal:
+            raise ValueError(
+                f"secondary chain {self.name!r} declares terminal states "
+                f"{sorted(self.lifecycle.terminal)}. Only the lifecycle ends an entity's life; "
+                "a chain that could would silently remove entities the lifecycle still holds"
+            )
+        known = set(self.lifecycle.states)
+        unknown = sorted(set(self.coupling.forced_by.values()) - known)
+        if unknown:
+            raise ValueError(f"coupling forces {self.name!r} into unknown states: {unknown}")
+        unknown = sorted(set(self.coupling.stress) - known)
+        if unknown:
+            raise ValueError(f"coupling stresses unknown {self.name!r} states: {unknown}")
+        return self
+
+
 class DesignSpec(_Base):
     spec_version: int = SPEC_VERSION
     meta: Meta
@@ -1259,6 +1341,10 @@ class DesignSpec(_Base):
     derivations: list[Derivation] = Field(default_factory=list)
     buckets: dict[str, Bucket] = Field(default_factory=dict)
     lifecycle: Lifecycle | None = None
+    secondary_chains: list[SecondaryChain] = Field(
+        default_factory=list,
+        description="State machines running alongside the lifecycle, each owning one column — a credit rating that migrates on its own, for instance.",
+    )
     dynamics: Dynamics = Field(default_factory=Dynamics)
     generation: Generation = Field(default_factory=Generation)
     groups: list[Group] = Field(

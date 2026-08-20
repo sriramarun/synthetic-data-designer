@@ -182,19 +182,37 @@ def test_the_run_is_reproducible(tmp_path):
 
 
 def test_the_pack_does_not_overclaim():
-    """Two simplifications that must not be quietly forgotten.
+    """Limitations that must not be quietly forgotten.
 
-    If either stops being true, this test should fail and be deleted — it exists
-    to make the limitation visible, not to protect it.
+    Each assertion here is written to fail the moment its limitation is lifted,
+    so it has to be updated rather than deleted — that is the point.
+
+    Grouping and rating migration have both landed and their assertions are now
+    inverted. The rating one had to be rewritten twice over: it originally
+    looked for a hazard named "rating" on the *primary* lifecycle, which meant a
+    rating chain could arrive as a `secondary_chain` and the test would sail
+    past it, still asserting a limitation that no longer existed.
     """
     spec = api.load(PACK)
-    # Grouping has landed, so this assertion has inverted: the pack must now
-    # genuinely have obligors rather than genuinely lack them.
+
     assert spec.groups, "obligor grouping disappeared"
     assert spec.groups[0].columns, "the obligor carries no attributes of its own"
 
-    rating_matrix = [h for h in spec.lifecycle.hazards if "rating" in h.name.lower()]
-    assert not rating_matrix, "ratings are derived, not migrated by their own matrix"
+    chains = {c.name: c for c in spec.secondary_chains}
+    assert "rating" in chains, "the rating is no longer a chain of its own"
+
+    rating = chains["rating"]
+    assert rating.lifecycle.transitions, "the rating chain has no matrix to migrate on"
+    assert len(rating.lifecycle.states) >= 9, "fewer grades than the specification asks for"
+    assert rating.coupling.forced_by, "nothing ties the rating to the credit state"
+    assert rating.coupling.stress, "the rating does not feed back into distress"
+
+    # And it must no longer be computed from the credit state.
+    derived = [d for d in spec.derivations if d.target == rating.lifecycle.state_column]
+    assert not derived, (
+        "the rating is both migrated and derived; the derivation would overwrite "
+        "the chain every period"
+    )
 
 
 def test_no_real_company_or_manager_names():

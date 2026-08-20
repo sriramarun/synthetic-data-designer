@@ -39,6 +39,42 @@ import numpy as np
 from sdd.spec.schema import BernoulliHazard, ConditionHazard, DwellTimeHazard, Lifecycle
 
 
+def _scale_worse(rows: np.ndarray, source: np.ndarray, multipliers: np.ndarray) -> np.ndarray:
+    """Scale each row's *worsening* cells, renormalising so it stays a distribution.
+
+    The vectorised form of what a stress scenario does to the whole matrix: take
+    probability from staying put and getting better, give it to getting worse,
+    and keep the row summing to 1. Applied per entity here, so two facilities in
+    the same state can face different odds because something else about them
+    differs — their rating, for instance.
+
+    "Worse" is later in the declared state order, which every ladder in this
+    project already follows: Performing, Watchlist, Distressed, Defaulted.
+    """
+    width = rows.shape[1]
+    worse = np.arange(width)[None, :] > source[:, None]
+    scaled = rows.astype(float, copy=True)
+
+    before = (scaled * worse).sum(axis=1)
+    after = np.clip(before * multipliers, 0.0, 0.999999)
+    # A row with nothing worse to reach — the last state — is left alone.
+    movable = before > 0
+
+    factor = np.ones_like(before)
+    factor[movable] = after[movable] / before[movable]
+    scaled = np.where(worse, scaled * factor[:, None], scaled)
+
+    rest = ~worse
+    rest_before = (scaled * rest).sum(axis=1)
+    rest_factor = np.ones_like(rest_before)
+    live = movable & (rest_before > 0)
+    rest_factor[live] = (1.0 - after[live]) / rest_before[live]
+    scaled = np.where(rest, scaled * rest_factor[:, None], scaled)
+
+    totals = scaled.sum(axis=1, keepdims=True)
+    return np.divide(scaled, totals, out=scaled, where=totals > 0)
+
+
 @dataclass
 class LifecycleEngine:
     """Compiled, index-based form of a spec's lifecycle section.
@@ -55,6 +91,7 @@ class LifecycleEngine:
     terminal_idx: np.ndarray = field(init=False)
     absorbing_idx: np.ndarray = field(init=False)
     trans_state_idx: np.ndarray = field(init=False)
+    probs: np.ndarray | None = field(init=False)
     cumprobs: np.ndarray | None = field(init=False)
     # position in `trans_state_idx` for each global state index, -1 if absent
     _row_of: np.ndarray = field(init=False)
@@ -73,8 +110,10 @@ class LifecycleEngine:
             self._row_of[gidx] = row
 
         if self.lc.transitions is not None:
-            self.cumprobs = np.cumsum(np.asarray(self.lc.transitions, dtype=float), axis=1)
+            self.probs = np.asarray(self.lc.transitions, dtype=float)
+            self.cumprobs = np.cumsum(self.probs, axis=1)
         else:
+            self.probs = None
             self.cumprobs = None
 
     # -- helpers ------------------------------------------------------------
@@ -114,6 +153,7 @@ class LifecycleEngine:
         *,
         hazard_multipliers: dict[str, float] | None = None,
         condition_masks: dict[str, np.ndarray] | None = None,
+        row_multipliers: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """Advance every entity one period.
 
@@ -172,8 +212,19 @@ class LifecycleEngine:
             rows = self._row_of[state_idx]
             movable = ~moved & (rows >= 0)
             if movable.any():
+                picked = rows[movable]
+                if row_multipliers is None:
+                    cum = self.cumprobs[picked]
+                else:
+                    # One matrix row per entity rather than per state, because the
+                    # multiplier is a property of the entity — its rating, say —
+                    # and not of the state it happens to be in.
+                    cum = np.cumsum(
+                        _scale_worse(self.probs[picked], picked, row_multipliers[movable]),
+                        axis=1,
+                    )
                 draws = rng.random(int(movable.sum()))[:, None]
-                landed = (draws > self.cumprobs[rows[movable]]).sum(axis=1)
+                landed = (draws > cum).sum(axis=1)
                 new[movable] = self.trans_state_idx[landed]
 
         # -- pass 3: dwell-time hazards on the new state
