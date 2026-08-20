@@ -14,21 +14,17 @@ everything it produces to a `.sdd-workspace` folder in the directory you launche
 it from. Nothing is uploaded anywhere.
 
 Every screen below is captured in [`screenshots/`](screenshots), taken from a
-real run of the Dutch mortgage pack:
+real run of the European CLO pack:
 
 | | |
 |---|---|
-| [Step 1 — Upload](screenshots/01-upload.png) | schema and sample, plus the calibrated packs |
+| [Step 1 — Upload](screenshots/01-upload.png) | schema and sample, and the three calibrated packs |
 | [Step 2 — Review](screenshots/02-review.png) | detected columns, types, key, nullability, confidence |
-| [Step 3 — Scale](screenshots/03-configure-scale.png) | rows, seed, scenario |
-| [Step 3 — Generation method](screenshots/04-configure-method.png) | the six methods, with unavailable ones explained |
-| [Step 3 — Randomness](screenshots/05-configure-randomness.png) | noise, correlation, outliers, missing values |
-| [Step 3 — Data aging](screenshots/06-configure-aging.png) | periods, rates, new loans, the transition matrix |
-| [Step 3 — Schema](screenshots/07-configure-schema.png) | per-column distribution parameters |
-| [Step 3 — Advanced](screenshots/08-configure-advanced.png) | the YAML that actually runs |
-| [Step 4 — Generate](screenshots/09-generate.png) | the seven stages, mid-run |
-| [Step 5 — Results](screenshots/10-results.png) | summary, validation, four charts, the data table |
-| [Step 6 — Download](screenshots/11-download.png) | five formats and the per-period files |
+| [Step 3 — Configure](screenshots/03-configure.png) | five groups, two open, and what the run will produce |
+| [Step 3 — expanded](screenshots/04-configure-expanded.png) | every group open, showing what each holds |
+| [Step 4 — Generate](screenshots/05-generate.png) | the seven stages, mid-run |
+| [Step 5 — Results](screenshots/06-results.png) | summary, validation, and the pack's own four charts |
+| [Step 6 — Download](screenshots/07-download.png) | five formats and the per-period files |
 
 **Contents**
 
@@ -121,6 +117,7 @@ learned. A single snapshot still gives you every column's shape.
 
 | Pack | What it is |
 |---|---|
+| **European CLO — Leveraged Loans** (`clo_eu_leveraged_loans`) — *offered first* | 56 columns. Loans to *companies*, several per borrower. Bullet repayment, an open pool that keeps buying for two years, a watchlist-to-distress ladder, a nine-month workout after default, and credit ratings that drift on their own. Comes with a 19-figure monthly report and its own four charts |
 | **Dutch Green Loans — Residential Mortgages** (`rmbs_nl_green_lion`) | 71 columns, ESMA Annex 2. Annuity mortgages, house-price index, 8-state delinquency ladder |
 | **European Auto Loans — ESMA Annex 5** (`auto_abs_esma_annex5`) | 44 columns. Depreciating collateral, balloon payments on PCP contracts, fast write-off with recovery |
 
@@ -183,150 +180,75 @@ Applies your edits, re-validates, and moves to Configure.
 
 ## Step 3 — Configure
 
-Six tabs, all editing one document. Anything you change here appears in the
-Advanced tab's YAML immediately.
+**Five groups, two of them open.** The two that are open are the ones worth
+checking; the rest have working defaults, and each says on its own line what it
+currently holds — so an unopened group is an answered question rather than an
+unread page.
+
+A line at the top states what pressing Generate will produce:
+
+> **500** facilities over **36** monthly cut-offs → about **18,000** rows across
+> **56** columns.
+
+That arithmetic is the thing to read. The box asks how many *loans*; the row
+count is that times the number of cut-offs, and the two differ by a factor of
+thirty-six.
 
 The badge at the top right shows `valid · N cols · Np` or a problem count. You
-cannot generate while it is red, and the problems are listed at the bottom of the
-screen.
+cannot generate while it is red, and the problems are listed on screen.
 
-### Tab 1: Scale
+### Group 1: Size and shape *(open)*
 
-| Control | Range | What it does |
-|---|---|---|
-| **Rows to generate** | ≥ 1 | Entities in the opening pool — loans, leases, accounts. Each appears once per period, so total rows ≈ this × periods |
-| **Seed** | any integer | Same seed, same data, every time. Change it for a different draw of the same configuration |
-| **Scenario** | from the spec | A named stress overlay. The packs ship `base`, `adverse`, `severe` |
-
-A note below does the arithmetic: how many rows that adds up to, and a reminder
-that loans leaving the pool make the real count a little lower.
-
-### Tab 2: Generation method
-
-How each column's values are drawn. Whatever you pick is written into the
-configuration as generators you can read and edit.
-
-| Method | What it does | Use it when | Needs |
-|---|---|---|---|
-| **Statistical** | Every numeric column becomes a normal with the same mean and spread | The level matters and the shape does not. Fast and obvious | — |
-| **Distribution based** | The best-fitting named distribution per column — lognormal, gamma, beta — chosen by the profiler | Default. The most faithful closed-form option | — |
-| **Rule based** | No fitted shape: numbers uniform inside their bounds, categories equally likely inside their domain | You have a schema and no data | — |
-| **Sampling** | Resamples your observed values, spikes and all | Highest per-column fidelity; the only method that reproduces a zero-inflated column exactly | sample |
-| **CTGAN** | A deep tabular model trained on your tape, learning how columns move *together* | Joint structure matters more than auditability | sample + `pip install 'sdd[deep]'` |
-| **Hybrid** | Fitted distributions across the schema, then a deep polish over the columns it can improve | You want structure where it helps and a readable spec everywhere else | sample + `[deep]` |
-
-Unavailable methods are greyed out and say why.
-
-Two guarantees hold whichever you pick:
-
-- **Identifiers, date columns and the lifecycle state column are never
-  rewritten.** Turning a key into a normal distribution would destroy it.
-- **A rewrite may narrow a range, never widen one.** Moment-matching a lognormal
-  balance onto a normal would otherwise add a left tail the original never had,
-  and a few per cent of your portfolio would come back negative. Columns are held
-  inside what their original distribution allowed and what the spec asserts, and
-  the notes tell you how many were bounded.
-
-### Tab 3: Randomness
-
-Applied after sampling and **before anything is derived** — so a ratio recomputed
-from a jittered balance still matches that balance. Randomness never breaks
-internal consistency.
-
-| Control | Range | Step | What it does |
-|---|---|---|---|
-| **Noise** | 0 – 50% | 1% | Gaussian jitter on every numeric column, as a share of that column's own standard deviation. Zero-centred, so the mean holds and the spread grows. 5% is a realistic amount of measurement error |
-| **Correlation** | 0 – 100% | 5% | How much of the correlation measured in your sample to reimpose. Columns are **reordered** to match, which changes how they move together without changing any column's own distribution. 0 leaves them independent, 100% matches the sample |
-| **Outliers** | 0 – 10% | 0.5% | Share of rows pushed four standard deviations into the tail — the data-quality artefacts a downstream system should survive. Declared bounds are still respected |
-| **Missing values** | 0 – 50% | 1% | Share of values blanked across **optional** columns only |
-
-**Order matters and is fixed**: correlation → outliers → noise → missing values.
-Outliers before noise, so an outlier is a decision rather than an accident of a
-wide jitter; missing values last, so a blanked value is never first used to
-compute something else.
-
-**Never touched by any of them:** identifiers, the date column, the lifecycle
-state column, anything a state pins a value to, amortisation inputs, counters and
-accruals. Blanking those would not simulate messy data, it would simulate a
-broken file.
-
-If a control cannot do anything it says so rather than sitting there inert —
-"every column is marked required", or "no sample was analysed, so no relationship
-between columns was ever measured".
-
-### Tab 4: Data aging
-
-Walking the pool forward, period by period.
-
-| Control | Range | What it does |
-|---|---|---|
-| **Number of periods** | ≥ 1 | How many cut-offs to emit, starting from the calendar's start date |
-| **Frequency** | Monthly / Quarterly / Annually | How far apart the cut-offs are. The rates below are annual either way |
-| **Lifecycle** | — | Read-only: the states this configuration has, in order |
-| **Default rate** (annual) | 0 – 50% | Share of performing loans that default within a year. Setting it **rescales the transition matrix** and renormalises every row, so the matrix stays a valid matrix |
-| **Prepayment rate** (annual) | 0 – 50% | Chance a healthy loan redeems early. Applied as the hazard rate the engine already uses |
-| **Recovery rate** | 0 – 50% | Share of the balance recovered when a loan writes off, booked in the period it happens. A `recovery_amount` column is added if there is not one |
-| **New loans per period** | 0 – 10% | Share of the opening pool written at **every cut-off after the first** |
-
-Any control the configuration cannot honour is disabled with the reason —
-"this configuration declares no state a loan cannot recover from, so nothing
-counts as a default".
-
-#### New loans — closed vs open pools
-
-At **0** the pool is *closed*: every loan exists at the first cut-off and the
-pool only shrinks as loans redeem and write off. That is right for a static
-securitisation.
-
-Above 0 the pool is *open*. A run starting in December 2024 and ageing 24 months
-will hold loans written across 2025 and 2026 as well as the opening book. New
-loans are drawn from the same distributions, stamped with the cut-off they arrive
-at, and aged from there. They are **not** aged in the period they arrive — a loan
-written this month has not also paid a month of interest.
-
-They enter performing, with every upward-ticking counter at zero, and where the
-configuration has an origination-date column they are dated to the period they
-arrive, so seasoning and remaining term follow. The note tells you which columns
-were dated.
-
-The validator adapts: `closed_pool` is replaced by `entity_spans_contiguous`
-(no entity vanishes and reappears) and `origination_window` (nothing joins
-outside the window you declared).
-
-#### Transition matrix
-
-Each row is a state, each column where a loan might be next period. Rows must sum
-to 1 — the total is live in the Σ column and turns red if it does not. Edit cells
-directly for fine control; the default-rate slider is a shortcut that rescales
-the whole thing.
-
-### Tab 5: Schema
-
-The distribution behind each sampled column, editable per generator kind:
-
-| Generator | What you can edit here |
+| Control | What it does |
 |---|---|
-| `categorical` | The weight of each value (first 24 shown) |
-| `scipy` | Each named parameter of the fitted distribution — `s`, `loc`, `scale`, `a`, `b` |
-| `gaussian` | `mean`, `stddev` |
-| `uniform` | `low`, `high` |
-| `bernoulli` | `p`, the probability of the true value |
-| `constant` | The value |
-| `empirical` | Read-only summary — edit in the Advanced tab |
+| **How many …** | Loans in the opening pool. The label names the pack's own unit — *facilities* for the CLO pack, *contracts* for auto. A pack that states the size it was calibrated for opens at that size |
+| **Seed** | Same seed, same data, every time |
+| **Scenario** | A named stress overlay. All three packs ship `base`, `adverse`, `severe` |
+| **Number of periods** | How many cut-offs to emit |
+| **Frequency** | Weekly, fortnightly, monthly, quarterly or annually. Rates below are annual either way |
+| **Lifecycle** | Read-only: the states this pack moves loans through |
 
-Each row shows the column's role, its generator kind, an `optional` badge if it
-may be blanked, and a confidence badge. Low-confidence columns carry a **Review**
-note saying what to check. **Filter columns…** narrows the list; 100 are shown at
-a time.
+### Group 2: How loans behave *(open)*
 
-### Tab 6: Advanced
+Three annual rates, each a slider with the calibrated value already set.
 
-The whole configuration as YAML, and it is what runs. Everything the forms do not
-expose can be set here — see [the next section](#everything-only-the-yaml-exposes).
+| Control | What it does |
+|---|---|
+| **Default rate** | Share of performing loans defaulting within a year. Rescales the transition matrix and renormalises every row, so it stays a matrix |
+| **Prepayment rate** | Annual chance a healthy loan repays early |
+| **Recovery rate** | Share of the balance recovered on write-off |
+| **New business** | Whether the pool keeps lending, how many join each period, and when buying stops |
 
-- **Apply** parses and validates. If it fails, nothing changes and every problem
-  is listed.
-- **Revert** throws away your text and re-renders from the forms.
+A rate the configuration cannot express is disabled and says why — a pack with no
+write-off state has nowhere to book a recovery.
+
+### Group 3: Realism *(collapsed)*
+
+How each value is drawn, and how much imperfection to add.
+
+**Six generation methods**, from moment-matched normals to a deep tabular model.
+Whatever you pick is written into the configuration as generators you can read.
+CTGAN and Hybrid need sample data and the `deep` extra, and are greyed out
+without them.
+
+**Four noise controls** — noise, correlation, outliers, missing values — applied
+after sampling and before anything is derived, so a ratio recomputed from a
+jittered balance still matches that balance. Identifiers, dates, states and the
+inputs to amortisation are never touched.
+
+### Group 4: Columns *(collapsed)*
+
+The distribution behind each column, filterable by name. Edit a weight or a bound
+and it is validated immediately.
+
+### Group 5: The configuration itself *(collapsed)*
+
+The **transition matrix** — each row a state, each column where a loan might be
+next period. Rows must sum to 1; the total is live and turns red if it does not.
+
+The **YAML**, which is the whole configuration and is what actually runs.
+Anything the forms do not expose can be set here. **Apply** validates and adopts
+it; **Revert** discards.
 
 ### ➡ Generate data
 
@@ -376,15 +298,36 @@ one was applied.
 
 ### Charts
 
+**Distribution comparison** is always shown: a histogram of one column, generated
+against your sample on shared bins. Pick the column from the dropdown. Without a
+sample you get the generated series alone. It is the one chart genuinely about
+the data rather than the asset class.
+
+**The rest depend on the pack.** A pack can declare its own charts, and when it
+does they replace the generic ones — a delinquency curve means nothing for a
+corporate loan, which has no days-past-due ladder.
+
+*Packs that declare nothing* get three generic charts:
+
 | Chart | What it shows |
 |---|---|
-| **Distribution comparison** | A histogram of one column, generated against your sample, on shared bins. Pick the column from the dropdown. Without a sample you get the generated series alone |
-| **Delinquency curve** | Share of the *surviving* pool in each distressed state, period by period, plus a dashed total. Shares rather than counts, because a shrinking pool makes counts fall even when behaviour is unchanged |
+| **Delinquency curve** | Share of the *surviving* pool in each distressed state, period by period. Shares rather than counts, because a shrinking pool makes counts fall even when behaviour is unchanged |
 | **LTV distribution** | Leverage at the first cut-off against the last. A current LTV is preferred over an original one, which never moves |
-| **Pool balance over time** | Total outstanding balance per cut-off, with opening and closing figures, the pool factor and the surviving loan count |
+| **Pool balance over time** | Outstanding balance per cut-off, with the pool factor and surviving loan count |
 
-A chart that cannot be drawn says why — "no column looks like a loan-to-value
-ratio" — rather than rendering something meaningless.
+*The CLO pack* declares four of its own:
+
+| Chart | What it shows |
+|---|---|
+| **Portfolio par** | Collateral held, cut-off by cut-off. It runs down once reinvestment ends |
+| **Credit state** | Share of facilities performing, on watchlist, distressed or defaulted, stacked over time |
+| **CCC share of par** | The bucket every indenture caps. It rises as credit migrates, independently of how many facilities are visibly distressed |
+| **Industry concentration** | Par by industry at the final cut-off, largest first |
+
+A chart reads its figures from the portfolio report rather than recomputing them,
+so the line on screen is the same number the download carries. One that cannot be
+drawn says why rather than rendering something meaningless, and does not take the
+others down with it.
 
 ### Generated data
 
