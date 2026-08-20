@@ -38,6 +38,48 @@ MIN_TRANSITIONS_PER_ROW = 30
 # How closely a kernel must predict observed balances to be declared the match.
 AMORT_TOLERANCE = 0.02
 
+# A second chain has to move to be a chain. Below the floor the column is
+# static in all but name; above the ceiling it is noise rather than migration.
+MIN_CHAIN_CHURN = 0.002
+MAX_CHAIN_CHURN = 0.5
+
+# Above this, a candidate chain is a restatement of the primary state rather
+# than something migrating on its own.
+MAX_CHAIN_PURITY = 0.95
+
+# Above this, one candidate is a function of another and not a chain of its own.
+DERIVED_PURITY = 0.99
+
+# A primary state has to determine a secondary value this reliably before the
+# coupling is written down as forced rather than merely correlated.
+FORCED_PURITY = 0.95
+
+# A condition hazard is a claim that a rule fired, not that a coin landed. It is
+# held to a correspondingly higher standard: the rule must explain nearly every
+# move into the state, and nearly every row that satisfies it must be a move.
+CONDITION_PRECISION = 0.95
+CONDITION_RECALL = 0.9
+
+# Neither a delay nor a rule can be established from one or two observations.
+# Found by relearning a relearned CLO: the second-generation panel held a single
+# maturity, and "modal dwell = 18, on 100% of events" fired the dwell test on a
+# sample of one — writing an eighteen-month fixed delay into the spec on no
+# evidence at all. A flat rate is the honest fallback: it is also badly measured
+# from three events, but it does not dress the guess up as a mechanism.
+MIN_EXIT_EVENTS = 3
+MIN_CONDITION_EVENTS = MIN_EXIT_EVENTS
+
+# How much of a rule's misses may be written off as exclusions before the rule
+# itself is in doubt. Generous enough to recover a real carve-out, mean enough
+# that "it works apart from the third of the book where it doesn't" is refused.
+MAX_EXCLUDED_SHARE = 0.25
+MAX_EXCLUDED_STATES = 3
+
+# How far a column may jump as it lands, measured against how far it usually
+# moves in a period, before it is read as having been *set* by the transition
+# rather than crossed by it.
+MAX_LANDING_JUMP = 3.0
+
 # Names that mark a delinquency or status column.
 STATE_NAME_HINTS = (
     "arrears_bucket",
@@ -66,9 +108,23 @@ def learn_panel_dynamics(
 
     state_column = state_column or detect_state_column(df, profile)
     if state_column:
-        lifecycle = learn_lifecycle(ordered, eid, etime, state_column)
+        # Counters are the columns a deterministic exit is written against: a
+        # term counts down, a seasoning counts up, and the rule fires when one
+        # of them reaches its end. Static numeric columns are excluded because a
+        # value that never moves cannot be crossed.
+        candidates = [
+            c.name
+            for c in profile.columns
+            if c.role == "dynamic" and c.name in df.columns and _holds_numbers(df[c.name])
+        ]
+        lifecycle = learn_lifecycle(ordered, eid, etime, state_column, candidates)
         if lifecycle:
             out["lifecycle"] = lifecycle
+            chains = learn_secondary_chains(
+                ordered, eid, etime, state_column, profile, lifecycle["states"]
+            )
+            if chains:
+                out["secondary_chains"] = chains
 
     attrition = learn_attrition(df, eid, etime)
     if attrition:
@@ -182,6 +238,7 @@ def learn_exits(
     terminal: list[str],
     absorbing: list[str],
     periods_per_year: float,
+    numeric_columns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """How entities leave the pool, one rule per terminal state.
 
@@ -232,9 +289,15 @@ def learn_exits(
         modal_share = float(dwell.iloc[0] / dwell.sum())
 
         # A spike in the dwell distribution, from one source state, is a delay.
-        # Both conditions matter: a flat hazard out of a rare state can look
-        # spiky by accident, and a genuine delay always comes from one place.
-        if modal_dwell > 1 and modal_share > 0.55 and dominant_share > 0.7:
+        # Three conditions matter: a flat hazard out of a rare state can look
+        # spiky by accident, a genuine delay always comes from one place, and a
+        # spike needs enough observations to be a spike rather than a data point.
+        if (
+            len(moves) >= MIN_EXIT_EVENTS
+            and modal_dwell > 1
+            and modal_share > 0.55
+            and dominant_share > 0.7
+        ):
             exits.append(
                 {
                     "kind": "dwell_time",
@@ -250,6 +313,32 @@ def learn_exits(
                     f"{modal_dwell + 1} periods in {dominant!r}",
                 }
             )
+            continue
+
+        # No spike in the clock, so try a rule over the entity's own columns
+        # before falling back to chance.
+        #
+        # Ordered after the dwell test rather than before it, which took a
+        # measurement to settle. Run first, this displaced the auto and green
+        # packs' charge-off — a nine-month workout — with `days_past_due >= 180`,
+        # which scores perfectly for the uninteresting reason that days past due
+        # *is* the workout clock in other units. Restating a clock as a threshold
+        # on its own read-out adds nothing and hides the mechanism.
+        #
+        # A genuine rule looks different: facilities mature after wildly varying
+        # spells in the performing state, so no dwell spike exists to explain
+        # them, and the countdown column is the only thing that does.
+        condition = learn_condition(
+            ordered,
+            id_column,
+            time_column,
+            state_column,
+            state,
+            [s for s in sources.index.astype(str) if s not in terminal],
+            numeric_columns or [],
+        )
+        if condition:
+            exits.append(condition)
             continue
 
         # Otherwise a flat per-period chance, measured over the entities that
@@ -273,6 +362,197 @@ def learn_exits(
     return exits
 
 
+def learn_condition(
+    ordered: pd.DataFrame,
+    id_column: str,
+    time_column: str,
+    state_column: str,
+    to_state: str,
+    sources: list[str],
+    numeric_columns: list[str],
+) -> dict[str, Any] | None:
+    """Whether entering a state is explained by a column crossing a threshold.
+
+    The other two hazards are chance. Maturity is not: a loan matures when *its
+    own* maturity date arrives, and relearning that as a flat monthly rate gives
+    every loan the same chance of maturing in month three — the 72-month loans
+    included. The panel says which it was, and this is the test.
+
+    Read from the **landing** row rather than the last row before the move.
+    The engine advances counters and then evaluates, so a facility whose
+    countdown reads 2 on its last live row is at 1 when the rule fires; taking
+    the earlier value would shorten every term by a month on each round trip.
+    Reading where the entity landed sidesteps the arithmetic entirely.
+
+    Held to precision *and* recall, because either alone is easy to satisfy by
+    accident. Recall alone: "balance <= 10,000,000" catches every maturity in a
+    book where nothing is that large. Precision alone: a threshold met by three
+    rows, all of which happen to be maturities.
+    """
+    landings = ordered[ordered[state_column] == to_state].groupby(id_column).head(1)
+    if len(landings) < MIN_CONDITION_EVENTS:
+        return None
+    entered = set(landings[id_column])
+
+    best: dict[str, Any] | None = None
+    for column in numeric_columns:
+        values = pd.to_numeric(landings[column], errors="coerce").dropna()
+        if len(values) < MIN_CONDITION_EVENTS:
+            continue
+
+        counts = values.value_counts()
+        modal = float(counts.index[0])
+        if counts.iloc[0] / len(values) < CONDITION_RECALL:
+            continue
+
+        whole = ordered[column].dropna()
+        for operator in ("<=", ">="):
+            # The threshold has to sit at an edge of the column's range. A
+            # midpoint would split the column rather than mark the end of
+            # something, and "balance >= median" is not a maturity rule however
+            # well it scores.
+            if operator == "<=" and modal > whole.quantile(0.15):
+                continue
+            if operator == ">=" and modal < whole.quantile(0.85):
+                continue
+
+            satisfied = ordered[column] <= modal if operator == "<=" else ordered[column] >= modal
+            if not satisfied.any():
+                continue
+
+            # Scored per entity, not per row. An entity that matures sits in the
+            # matured state for the rest of the panel, and every one of those
+            # rows still satisfies the condition — counted by row, a state that
+            # is entered early would outscore one entered late for no reason
+            # beyond how long the panel ran afterwards.
+            reached = set(ordered.loc[satisfied, id_column])
+            if not reached:
+                continue
+            if not _crossed_rather_than_set(ordered, id_column, state_column, to_state, column):
+                continue
+
+            excluded = _condition_exclusions(
+                ordered, id_column, state_column, satisfied, reached - entered
+            )
+            eligible = reached
+            if excluded:
+                spared = set(
+                    ordered.loc[satisfied & ordered[state_column].isin(excluded), id_column]
+                )
+                eligible = reached - (spared - entered)
+
+            if not eligible:
+                continue
+            precision = len(eligible & entered) / len(eligible)
+            recall = len(eligible & entered) / len(entered)
+            if precision < CONDITION_PRECISION or recall < CONDITION_RECALL:
+                continue
+
+            score = precision * recall
+            if best is None or score > best["_score"]:
+                note = f"{len(entered)} entries, {precision:.0%} of entities meeting "
+                note += f"{column} {operator} {modal:g} are in {to_state!r}"
+                if excluded:
+                    note += f"; {sorted(excluded)} excluded"
+                best = {
+                    "kind": "condition",
+                    "name": f"to_{_slug(to_state)}",
+                    "when": f"{column} {operator} {modal:g}",
+                    "to_state": to_state,
+                    "excluded_states": sorted(excluded),
+                    "_score": score,
+                    "evidence": note,
+                }
+
+    if best is not None:
+        best.pop("_score")
+    return best
+
+
+def _crossed_rather_than_set(
+    ordered: pd.DataFrame,
+    id_column: str,
+    state_column: str,
+    to_state: str,
+    column: str,
+) -> bool:
+    """Whether the entity crossed the threshold, or the transition put it there.
+
+    The distinction the whole detector turns on, and the one it got wrong first.
+    Every prepaid facility satisfies `current_balance <= 0` — perfectly, on 255
+    of 255 — because entering Prepaid is what *sets* the balance to zero. Read
+    as a trigger it is circular: regenerate with "prepay when the balance
+    reaches zero" and nothing ever prepays, because nothing reaches zero without
+    prepaying first. Prepayment would silently disappear from the book.
+
+    A genuine threshold is approached. `months_to_maturity` reads 2 on the last
+    live row and 1 on the landing row — one ordinary step of a counter that
+    steps by one. A balance set on arrival reads four million and then zero.
+
+    So the column's jump as it lands is compared with how far it moves in an
+    ordinary period. A step is a crossing; a cliff is an assignment.
+    """
+    frame = ordered[[id_column, state_column, column]].copy()
+    frame["_value"] = pd.to_numeric(frame[column], errors="coerce")
+    frame["_prev"] = frame.groupby(id_column)["_value"].shift()
+    frame["_was"] = frame.groupby(id_column)[state_column].shift()
+
+    landing = frame[(frame[state_column] == to_state) & (frame["_was"] != to_state)]
+    landing = landing.dropna(subset=["_value", "_prev"])
+    if landing.empty:
+        return True
+
+    live = frame[(frame[state_column] != to_state) & (frame["_was"] == frame[state_column])]
+    ordinary = float((live["_value"] - live["_prev"]).abs().median() or 0.0)
+    jump = float((landing["_value"] - landing["_prev"]).abs().median())
+
+    if jump == 0.0:
+        return True
+    if ordinary == 0.0:
+        # The column does not move on its own, so any movement at the boundary
+        # came from the boundary.
+        return False
+    return jump <= MAX_LANDING_JUMP * ordinary
+
+
+def _condition_exclusions(
+    ordered: pd.DataFrame,
+    id_column: str,
+    state_column: str,
+    satisfied: pd.Series,
+    missed: set[Any],
+) -> set[str]:
+    """States that meet the condition without obeying it.
+
+    A defaulted facility's term keeps counting down while it sits in workout, so
+    it reaches zero months to maturity and never matures — it resolves through
+    recovery instead. Counted as counter-examples, five such facilities dropped
+    a perfect rule to 93% precision and the whole maturity condition was lost,
+    relearned as a flat monthly chance.
+
+    They are not counter-examples, they are a carve-out, and the pack this was
+    measured against says so in as many words: `excluded_states: [Defaulted]`.
+    Recovering the carve-out is a better answer than loosening the threshold,
+    because it puts the exception in the spec where a reader can see it.
+
+    Bounded on both sides, so that this cannot become a way to excuse any rule:
+    a handful of states, covering a minority of the misses.
+    """
+    if not missed:
+        return set()
+
+    rows = ordered[satisfied & ordered[id_column].isin(missed)]
+    first = rows.groupby(id_column).head(1)
+    states = first[state_column].dropna().value_counts()
+    if states.empty or len(states) > MAX_EXCLUDED_STATES:
+        return set()
+
+    reached_total = ordered.loc[satisfied, id_column].nunique()
+    if reached_total and len(missed) / reached_total > MAX_EXCLUDED_SHARE:
+        return set()
+    return {str(v) for v in states.index}
+
+
 def _reachable_only_from(moves: pd.DataFrame, state_column: str) -> set[str]:
     """States whose exits all come from a single source."""
     counts = moves[state_column].value_counts()
@@ -284,7 +564,11 @@ def _slug(value: str) -> str:
 
 
 def learn_lifecycle(
-    ordered: pd.DataFrame, id_column: str, time_column: str, state_column: str
+    ordered: pd.DataFrame,
+    id_column: str,
+    time_column: str,
+    state_column: str,
+    numeric_columns: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Count observed state transitions into a matrix.
 
@@ -388,6 +672,7 @@ def learn_lifecycle(
             [str(s) for s in terminal],
             [str(s) for s in absorbing],
             periods_per_year=12.0,
+            numeric_columns=numeric_columns or [],
         ),
         "low_evidence_states": [str(s) for s in thin],
         "state_order_note": (
@@ -410,6 +695,241 @@ def _renormalise(row: list[float]) -> list[float]:
     biggest = rounded.index(max(rounded))
     rounded[biggest] = round(rounded[biggest] + residue, 6)
     return rounded
+
+
+# ---------------------------------------------------------------------------
+# secondary chains
+# ---------------------------------------------------------------------------
+
+
+def learn_secondary_chains(
+    ordered: pd.DataFrame,
+    id_column: str,
+    time_column: str,
+    state_column: str,
+    profile: DatasetProfile,
+    primary_states: list[str],
+) -> list[dict[str, Any]]:
+    """Columns that migrate on their own, alongside the lifecycle.
+
+    A credit rating is the case. It moves under its own steam, and normally
+    moves *before* distress is visible — a company is downgraded while still
+    paying every instalment, which is the early warning the rating exists to
+    give. Relearned as an ordinary categorical column it would be redrawn
+    independently each period, and a facility would flicker between BB and CCC
+    from one month to the next.
+
+    The hard part is not finding a column that changes. It is telling a chain
+    from a **restatement of the primary state**: a column holding "Performing" /
+    "Non-performing" also changes over time, and also has a tidy matrix, but it
+    carries nothing the lifecycle does not already say. Those are rejected on
+    purity — if knowing the state tells you the column, the column is derived.
+    """
+    chains: list[dict[str, Any]] = []
+    for column in _chain_candidates(ordered, profile, state_column):
+        matrix = _chain_matrix(ordered, id_column, time_column, column)
+        if matrix is None:
+            continue
+        chains.append(
+            {
+                "name": _slug(column).removesuffix("_at_cutoff") or column,
+                "lifecycle": matrix,
+                "coupling": _chain_coupling(
+                    ordered, id_column, state_column, column, matrix["states"], primary_states
+                ),
+            }
+        )
+    return chains
+
+
+def _chain_candidates(
+    ordered: pd.DataFrame, profile: DatasetProfile, state_column: str
+) -> list[str]:
+    """Categorical columns that move, but not in lockstep with the lifecycle."""
+    # Columns the bucket detector has already claimed are derivations, not
+    # chains. `balance_bucket` migrates as a loan amortises and produces a
+    # perfectly good matrix, but generated independently it would report a
+    # 300k-350k band on a loan carrying 80k.
+    derived = {d.target for d in profile.derived}
+
+    out = []
+    for column in profile.columns:
+        if column.name == state_column or column.name not in ordered.columns:
+            continue
+        if column.name in derived:
+            continue
+        if column.role != "dynamic" or column.dtype not in ("category", "str", "bool"):
+            continue
+        values = ordered[column.name].dropna()
+        if not 2 <= values.nunique() <= MAX_STATE_VALUES:
+            continue
+
+        # Churn: the share of consecutive observations where the value moved.
+        changed = ordered[column.name].ne(ordered[column.name].shift())
+        changed &= ordered[profile.id_column].eq(ordered[profile.id_column].shift())
+        churn = float(changed.sum() / max(len(ordered) - 1, 1))
+        if not MIN_CHAIN_CHURN <= churn <= MAX_CHAIN_CHURN:
+            continue
+
+        # Purity: how much of the column the primary state already accounts for.
+        # A column the state can predict is a relabelling of the state.
+        modal = ordered.groupby(state_column)[column.name].transform(
+            lambda s: s.mode().iloc[0] if not s.mode().empty else None
+        )
+        purity = float((ordered[column.name] == modal).mean())
+        if purity > MAX_CHAIN_PURITY:
+            continue
+
+        out.append(column.name)
+
+    return _drop_derived(ordered, out)
+
+
+def _drop_derived(ordered: pd.DataFrame, candidates: list[str]) -> list[str]:
+    """Remove candidates that are functions of another candidate.
+
+    Measured, and the measurement mattered: the CLO panel offered three chains
+    where it has one. `rating_at_cutoff` holds nine grades, `rating_bucket`
+    collapses them to four, and `ccc_flag` to two — and all three migrate, all
+    three produce a clean matrix, and two of them are the first one with detail
+    thrown away.
+
+    Run as three independent chains they would drift apart, and the output would
+    carry facilities rated B- whose bucket said CCC. The finer column wins,
+    because it is the one the others can be recovered from.
+
+    Bucketings of a *numeric* column are already caught upstream by the bucket
+    detector and never reach here; this is the categorical case it does not
+    cover.
+    """
+    keep = list(candidates)
+    for coarse, fine in itertools.permutations(candidates, 2):
+        if coarse not in keep:
+            continue
+        pair = ordered[[fine, coarse]].dropna()
+        if pair.empty or pair[fine].nunique() <= pair[coarse].nunique():
+            continue
+        modal = pair.groupby(fine)[coarse].transform(
+            lambda s: s.mode().iloc[0] if not s.mode().empty else None
+        )
+        if float((pair[coarse] == modal).mean()) >= DERIVED_PURITY:
+            keep.remove(coarse)
+    return keep
+
+
+def _chain_matrix(
+    ordered: pd.DataFrame, id_column: str, time_column: str, column: str
+) -> dict[str, Any] | None:
+    """The chain's own transition matrix.
+
+    Deliberately not `learn_lifecycle`. That function identifies terminal states
+    by entities ceasing to be reported, which is a fact about the *lifecycle* —
+    an entity stops being reported because it left the pool, not because its
+    rating did anything. Reusing it would declare D terminal, and the schema
+    rightly refuses a secondary chain that can end an entity's life.
+    """
+    nxt = ordered.groupby(id_column)[column].shift(-1)
+    observed = pd.DataFrame({"from": ordered[column], "to": nxt}).dropna()
+    if len(observed) < MIN_TRANSITIONS_PER_ROW:
+        return None
+
+    first = ordered[ordered[time_column] == ordered[time_column].min()][column].value_counts()
+    labels = list(first.index) + [
+        v for v in sorted(ordered[column].dropna().unique(), key=str) if v not in first.index
+    ]
+    counts = pd.crosstab(observed["from"], observed["to"]).reindex(
+        index=labels, columns=labels, fill_value=0
+    )
+    totals = counts.sum(axis=1)
+
+    rows = []
+    for label in labels:
+        total = totals.get(label, 0)
+        if total > 0:
+            rows.append(_renormalise([round(float(v), 6) for v in (counts.loc[label] / total)]))
+        else:
+            rows.append([1.0 if other == label else 0.0 for other in labels])
+
+    absorbing = [
+        label
+        for label in labels
+        if totals.get(label, 0) > 0 and counts.loc[label, label] / totals[label] > 0.999
+    ]
+    thin = [label for label in labels if totals.get(label, 0) < MIN_TRANSITIONS_PER_ROW]
+
+    return {
+        "state_column": column,
+        "states": [str(v) for v in labels],
+        "transitions": rows,
+        "absorbing": [str(v) for v in absorbing],
+        "terminal": [],
+        "initial_distribution": {
+            str(k): round(float(v), 6) for k, v in first.div(first.sum()).items()
+        },
+        "observed_transitions": len(observed),
+        "low_evidence_states": [str(v) for v in thin],
+        "state_order_note": (
+            "chain states are ordered by their share of the first cut-off, which is a "
+            "frequency ordering and not a severity one; nothing in the engine reads it as "
+            "severity, but a reader might"
+        ),
+        "confidence": 0.3 if thin else 0.8,
+    }
+
+
+def _chain_coupling(
+    ordered: pd.DataFrame,
+    id_column: str,
+    state_column: str,
+    column: str,
+    chain_states: list[str],
+    primary_states: list[str],
+) -> dict[str, Any]:
+    """How the chain and the lifecycle hold each other in line.
+
+    Two directions, measured separately because they are different claims.
+
+    ``forced_by`` is near-certainty: if practically every defaulted facility is
+    rated D, the state is overwriting the rating and the spec should say so
+    outright rather than hope the matrix reproduces it.
+
+    ``stress`` is the other direction — being rated CCC makes falling further
+    behind more likely. Measured as a ratio of worsening rates, using the
+    primary's own ordering to define worse, and left out where the evidence is
+    too thin to distinguish it from the base rate.
+    """
+    forced: dict[str, str] = {}
+    for state in primary_states:
+        rows = ordered[ordered[state_column] == state][column].dropna()
+        if len(rows) < MIN_TRANSITIONS_PER_ROW:
+            continue
+        counts = rows.value_counts(normalize=True)
+        if float(counts.iloc[0]) >= FORCED_PURITY and str(counts.index[0]) in chain_states:
+            forced[str(state)] = str(counts.index[0])
+
+    rank = {state: i for i, state in enumerate(primary_states)}
+    current = ordered[state_column].map(rank)
+    following = ordered.groupby(id_column)[state_column].shift(-1).map(rank)
+    worsened = (following > current).where(following.notna())
+
+    baseline = float(worsened.mean()) if worsened.notna().any() else 0.0
+    stress: dict[str, float] = {}
+    if baseline > 0:
+        for value in chain_states:
+            # Rows forced into this chain state carry no information about it:
+            # the rating is D *because* the facility defaulted, so measuring
+            # what D does to default risk would be reading the arrow backwards.
+            mask = (ordered[column] == value) & worsened.notna()
+            if str(value) in set(forced.values()):
+                continue
+            if int(mask.sum()) < MIN_TRANSITIONS_PER_ROW:
+                continue
+            rate = float(worsened[mask].mean())
+            multiplier = round(min(max(rate / baseline, 0.1), 20.0), 3)
+            if abs(multiplier - 1.0) > 0.25:
+                stress[str(value)] = multiplier
+
+    return {"forced_by": forced, "stress": stress}
 
 
 # ---------------------------------------------------------------------------

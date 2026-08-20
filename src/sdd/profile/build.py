@@ -22,6 +22,7 @@ from sdd.spec.schema import (
     Amortisation,
     Bucket,
     Calendar,
+    ChainCoupling,
     ChartSpec,
     Column,
     CorrelationTarget,
@@ -32,12 +33,15 @@ from sdd.spec.schema import (
     Emit,
     Entity,
     Generation,
+    Group,
+    GroupSize,
     Index,
     Lifecycle,
     Meta,
     Metric,
     Originations,
     Results,
+    SecondaryChain,
     Target,
     Validation,
 )
@@ -55,8 +59,16 @@ def spec_from_profile(
     periods: int | None = None,
     freq: str = "month_end",
     start: str | None = None,
+    data: Any = None,
 ) -> DesignSpec:
-    """Build a design spec from a profile, optionally constrained by a structure."""
+    """Build a design spec from a profile, optionally constrained by a structure.
+
+    ``data`` is the sample the profile was taken from, and only group detection
+    needs it: how many facilities each obligor carries, and how many of the
+    obligors arriving in month twenty were already on the book, are counts over
+    rows rather than summaries of columns. Without it everything else is built as
+    before and the group structure is simply not looked for.
+    """
     if not profile.id_column:
         raise ValueError(
             "cannot build a spec without an entity identifier. Pass id_column= to "
@@ -131,6 +143,8 @@ def spec_from_profile(
 
     # One of these is measured and two are proposed, and the difference matters
     # enough that each function says which it is.
+    spec.groups = _build_groups(data, profile, spec)
+    spec.secondary_chains = _build_secondary_chains(profile)
     spec.entity.targets = _build_targets(profile, spec)
     spec.metrics = _build_metrics(profile, spec)
     spec.results = _build_results(spec)
@@ -377,6 +391,126 @@ def _build_lifecycle(profile: DatasetProfile) -> Lifecycle | None:
     )
 
 
+def _build_groups(data: Any, profile: DatasetProfile, spec: DesignSpec) -> list[Group]:
+    """Lift the parent record out of the entity's own columns.
+
+    Detection is in `sdd.profile.groups`; this is the surgery that follows it,
+    and the surgery is the point. Leaving the attributes where they are and
+    merely noting the key would change nothing — the industry would still be
+    drawn per facility, and the same obligor would still come out in four
+    industries at once.
+
+    So the shared columns are *moved*: out of `spec.columns`, where they are
+    drawn once per entity, into `group.columns`, where they are drawn once per
+    group and joined onto every member. The key column is dropped outright,
+    since the generator mints it from `id_format`.
+
+    The output order is left untouched. Group attributes reach the panel like any
+    other column, so a relearned tape has the same columns in the same places —
+    only their provenance changes.
+    """
+    import pandas as pd
+
+    from sdd.profile.groups import learn_groups
+
+    if not isinstance(data, pd.DataFrame):
+        return []
+
+    learned = learn_groups(data, profile)
+    if not learned:
+        return []
+
+    groups: list[Group] = []
+    for found in learned:
+        by_name = {c.name: c for c in spec.columns}
+        attributes = [by_name[name] for name in found["columns"] if name in by_name]
+        if len(attributes) < 2:
+            continue
+
+        moved = {c.name for c in attributes} | {found["key"]}
+        spec.columns = [c for c in spec.columns if c.name not in moved]
+        spec.constants = {k: v for k, v in spec.constants.items() if k not in moved}
+        _drop_from_correlation(spec, moved)
+
+        size = found["size"]
+        groups.append(
+            Group(
+                name=found["name"],
+                key=found["key"],
+                ratio=found["ratio"],
+                id_format=found["id_format"],
+                new_group_rate=found["new_group_rate"],
+                size=GroupSize(
+                    kind=size["kind"],
+                    concentration=size.get("concentration", 1.4),
+                    max_members=size.get("max_members"),
+                ),
+                columns=attributes,
+            )
+        )
+    return groups
+
+
+def _drop_from_correlation(spec: DesignSpec, moved: set[str]) -> None:
+    """Take the moved columns out of the correlation target.
+
+    The target is reimposed by reordering `spec.columns`, so naming a column that
+    now lives on the group makes the spec invalid — which is how this surfaced,
+    as a loader error rather than as anything subtle.
+
+    Worth stating what is lost rather than only what is fixed: revenue and
+    leverage really do move together on a real book, and once both are group
+    attributes that relationship is not carried anywhere. Group attributes are
+    drawn from their own generators, marginal by marginal. The obligor's columns
+    stay mutually consistent *across its facilities*, which is the point of the
+    feature; they are no longer correlated *with each other*, which is a real
+    loss and not one this branch closes.
+    """
+    target = spec.generation.correlation_target
+    if target is None:
+        return
+
+    keep = [i for i, name in enumerate(target.columns) if name not in moved]
+    if len(keep) < 2:
+        spec.generation.correlation_target = None
+        return
+
+    target.columns = [target.columns[i] for i in keep]
+    target.matrix = [[target.matrix[r][c] for c in keep] for r in keep]
+
+
+def _build_secondary_chains(profile: DatasetProfile) -> list[SecondaryChain]:
+    """Chains that migrate alongside the lifecycle.
+
+    The chain's own `Lifecycle` is reused wholesale — same column, same states,
+    same matrix — with two things stripped that the panel learner reports but a
+    chain may not have: terminal states, which only the lifecycle may declare,
+    and exit hazards, which are how an entity leaves the pool.
+    """
+    chains: list[SecondaryChain] = []
+    for learned in profile.dynamics.get("secondary_chains") or []:
+        inner = learned["lifecycle"]
+        chains.append(
+            SecondaryChain(
+                name=learned["name"],
+                lifecycle=Lifecycle(
+                    state_column=inner["state_column"],
+                    states=inner["states"],
+                    transitions=inner["transitions"],
+                    absorbing=inner.get("absorbing", []),
+                    initial_distribution=inner.get("initial_distribution") or None,
+                    terminal=[],
+                    hazards=[],
+                ),
+                coupling=ChainCoupling(
+                    forced_by=learned["coupling"]["forced_by"],
+                    stress=learned["coupling"]["stress"],
+                ),
+            )
+        )
+    return chains
+
+
 def _build_dynamics(profile: DatasetProfile, lifecycle: Lifecycle | None) -> Dynamics:
     learned = profile.dynamics
     amortisation = None
@@ -487,7 +621,9 @@ def build_spec(
         state_column=state_column,
         max_rows=max_rows,
     )
-    spec = spec_from_profile(profile, template=tmpl, name=name, periods=periods, **kwargs)
+    spec = spec_from_profile(
+        profile, template=tmpl, name=name, periods=periods, data=data, **kwargs
+    )
     return spec, profile
 
 

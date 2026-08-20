@@ -109,13 +109,19 @@ def test_a_relearned_spec_is_valid_and_runs(tmp_path, pack):
     assert regenerated["total_rows"] > 0
 
 
-def test_a_condition_hazard_still_comes_back_as_a_rate(learned_exits):
-    """Maturity is driven by a column, and no amount of counting states reveals it.
+def test_a_condition_hazard_comes_back_as_a_condition(learned_exits):
+    """Maturity is driven by a column, and now comes back that way.
 
-    Learned as a flat rate instead — which makes the state reachable and the
-    spec runnable, but is a different rule from the one that produced the data.
-    Recorded here so the limitation is visible rather than assumed away.
+    This test used to assert the opposite, and said so: a condition hazard was
+    relearned as a flat monthly rate, which made the state reachable and the
+    spec runnable but was a different rule from the one that produced the data.
+    The limitation was recorded here rather than assumed away, with a note
+    asking whoever lifted it to come back and change this.
+
+    Lifted. The rule is recovered expression and all, which matters because the
+    two are not interchangeable: a flat rate gives a 96-month facility the same
+    chance of maturing in month three as a 60-month one.
     """
-    assert learned_exits["Matured"]["kind"] == "bernoulli", (
-        "condition hazards are now inferred; update this test and the docs"
-    )
+    matured = learned_exits["Matured"]
+    assert matured["kind"] == "condition"
+    assert matured["when"] == "months_to_maturity <= 1"
