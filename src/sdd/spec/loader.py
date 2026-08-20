@@ -54,7 +54,13 @@ def load_spec_dict(raw: dict[str, Any], *, source: str | None = None) -> DesignS
 
 
 def dump_spec(spec: DesignSpec, path: str | Path, *, header: str | None = None) -> Path:
-    """Write a spec to YAML, preserving declaration order and dropping defaults."""
+    """Write a spec to YAML, preserving declaration order and dropping defaults.
+
+    ``header`` is commented here rather than by the caller. It used to be written
+    verbatim, which meant every caller had to remember to prefix its own lines
+    with ``#`` — and a caller that forgot produced a file that looked right, sat
+    beside the data as the record of what generated it, and did not parse.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = yaml.safe_dump(
@@ -63,7 +69,13 @@ def dump_spec(spec: DesignSpec, path: str | Path, *, header: str | None = None) 
         allow_unicode=True,
         width=100,
     )
-    path.write_text((f"{header}\n{body}" if header else body), encoding="utf-8")
+    if header:
+        commented = "\n".join(
+            line if line.startswith("#") else f"# {line}".rstrip()
+            for line in header.rstrip("\n").split("\n")
+        )
+        body = f"{commented}\n{body}"
+    path.write_text(body, encoding="utf-8")
     return path
 
 
