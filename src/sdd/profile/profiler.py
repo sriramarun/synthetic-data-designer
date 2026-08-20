@@ -621,14 +621,16 @@ def profile_dataset(
         [c.name for c in columns if c.dtype in ("int", "float") and c.role != "constant"],
     )
 
-    if is_panel and learn_dynamics:
-        from sdd.profile.panel import learn_panel_dynamics
-
-        profile.dynamics = learn_panel_dynamics(df, profile, state_column=state_column)
-
     # Columns computed from other columns are re-expressed as derivations, so
     # the generated data stays internally consistent instead of pairing a
     # balance with a band that does not contain it.
+    #
+    # Ahead of the dynamics pass, which it used to follow. A binned column moves
+    # over time like anything else, so the panel learner saw `balance_bucket`
+    # stepping down through its bands and offered it as a state machine
+    # migrating under its own steam. Marking derivations first means every later
+    # pass sees `role == "derived"` and leaves them alone — a band should follow
+    # the balance it was cut from, not run beside it.
     from sdd.profile.derived import find_bucket_columns
 
     buckets = find_bucket_columns(df, profile)
@@ -640,6 +642,11 @@ def profile_dataset(
                 col.role = "derived"
                 col.fit = None
                 col.note = by_name[col.name].note
+
+    if is_panel and learn_dynamics:
+        from sdd.profile.panel import learn_panel_dynamics
+
+        profile.dynamics = learn_panel_dynamics(df, profile, state_column=state_column)
 
     return profile
 

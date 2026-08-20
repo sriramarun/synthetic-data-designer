@@ -413,12 +413,23 @@ def _check_lifecycle_wiring(spec: DesignSpec) -> list[str]:
 def _check_emit(spec: DesignSpec) -> list[str]:
     problems: list[str] = []
     if spec.emit.column_order:
+        # Group keys and group attributes reach the panel like any other column
+        # — `attach_groups` writes both onto the frame — so a spec that orders
+        # them is ordering something real.
+        #
+        # Missing until now, and invisible until now: the one pack with groups
+        # declares no column_order, so nothing exercised the pair together. The
+        # profiler learning groups produced exactly that combination and was
+        # rejected for naming ten columns "nothing produces", every one of which
+        # the generator does produce.
         produced = (
             set(spec.column_names)
             | set(spec.constants)
             | {d.target for d in spec.derivations}
             | {c.column for c in spec.dynamics.counters}
             | {a.column for a in spec.dynamics.accruals}
+            | {g.key for g in spec.groups}
+            | {c.name for g in spec.groups for c in g.columns}
         )
         missing = [c for c in spec.emit.column_order if c not in produced]
         if missing:
