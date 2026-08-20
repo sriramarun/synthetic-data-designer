@@ -289,7 +289,10 @@
         <div class="chart-host" id="chart-distribution"></div>
       </div>
 
-      <div class="grid two">
+      <!-- Charts this pack asked for. Empty unless its spec declares any. -->
+      <div id="pack-charts"></div>
+
+      <div class="grid two" id="legacy-charts-pair">
         <div class="card">
           <div class="card-head"><h2>Delinquency curve</h2></div>
           <p class="hint">Share of the surviving pool in each distressed state, period by
@@ -303,7 +306,7 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" id="legacy-chart-balance">
         <div class="card-head"><h2>Pool balance over time</h2></div>
         <p class="hint">Total outstanding balance per cut-off, and the pool factor beside it.</p>
         <div class="chart-host" id="chart-balance"></div>

@@ -1167,6 +1167,48 @@ metrics:
     column: realised_loss
     decimals: 2
 
+
+# ---------------------------------------------------------------------------
+# results — what to draw
+# ---------------------------------------------------------------------------
+#
+# The four §18 asks for. Until a pack could say, the results screen drew a
+# delinquency curve and a loan-to-value distribution for everything — neither of
+# which exists for a corporate loan.
+#
+# Three of the four read the metrics table rather than re-aggregating the panel,
+# so the line on screen is the same number the downloaded report carries.
+
+results:
+  charts:
+    - kind: series
+      title: Portfolio par
+      metric: collateral_par
+      unit: money
+      description: Collateral held, cut-off by cut-off. It runs down once reinvestment ends.
+
+    - kind: stacked_series
+      title: Credit state
+      column: credit_state
+      states: [Performing, Watchlist, Distressed, Defaulted]
+      unit: percent
+      description: Share of facilities in each state. The terminal states are excluded — they
+        leave the pool, so stacking them would double-count exits.
+
+    - kind: series
+      title: CCC share of par
+      metric: ccc_par_pct
+      unit: percent
+      description: The bucket every indenture caps. It rises as credit migrates, independently
+        of how many facilities are visibly distressed.
+
+    - kind: category_bar
+      title: Industry concentration
+      group: industry
+      column: current_par
+      unit: money
+      description: Par by industry at the final cut-off.
+
 emit:
   filename: "synthetic_clo_{yyyymm}.csv"
   # Thirty-six monthly tapes beside the panel, the manifest and two reports is a

@@ -147,19 +147,77 @@ sdd run rmbs_nl_green_lion -n 50000 -o ./severe --scenario severe
 
 ## The calibrated packs
 
-Two ship, deliberately unlike each other — a second pack is only worth having if
-it exercises the engine differently.
+Three ship, deliberately unlike each other — a pack is only worth having if it
+exercises the engine differently.
 
-| | `rmbs_nl_green_lion` | `auto_abs_esma_annex5` |
-|---|---|---|
-| **Shown as** | Dutch Green Loans — Residential Mortgages | European Auto Loans — ESMA Annex 5 |
-| Template | ESMA Annex 2, residential real estate | ESMA Annex 5, automobile |
-| Columns | 71 | 44 |
-| Collateral | a house, **indexed upward** | a car, **depreciating** at 15%/yr |
-| Term | 360 months — a 24-cut-off panel barely dents it | 24-72 months, so contracts mature inside the panel |
-| Product shapes | interest-only vs annuity | hire purchase, PCP with a balloon, lease, loan |
-| Default → write-off | 9 months | 6 months, then **recovery** at 45% of balance |
-| Calibrated to | upstream deeploans' Dutch RMBS deal | published European prime auto ABS ranges |
+| | `clo_eu_leveraged_loans` | `rmbs_nl_green_lion` | `auto_abs_esma_annex5` |
+|---|---|---|---|
+| **Shown as** | European CLO — Leveraged Loans | Dutch Green Loans — Residential Mortgages | European Auto Loans — ESMA Annex 5 |
+| Template | none — portfolio analytics | ESMA Annex 2, residential real estate | ESMA Annex 5, automobile |
+| Columns | 56 | 71 | 44 |
+| Borrower | a **company**, several loans each | a household, one loan | a household, one contract |
+| Collateral | none — senior secured claim | a house, **indexed upward** | a car, **depreciating** at 15%/yr |
+| Balance | **bullet** — flat, then repaid at maturity | annuity or interest-only | annuity, with a balloon on PCP |
+| Pool | **open** — buys new loans for 24 months | closed | closed |
+| Ladder | watchlist → distressed → defaulted | 1-29 → 30-59 → 60-89 → 90+ DPD | 1-30 → 31-60 → 61-90 DPD |
+| Exits | prepaid, sold, **matured**, recovered | prepaid, charged off | prepaid, charged off |
+| Default → resolution | 9-month workout, then **recovery at 62%** | 9 months to write-off | 6 months, then recovery at 45% |
+| Extras | **credit ratings migrate on their own chain**; 19 monthly portfolio metrics | — | — |
+| Calibrated to | demo assumptions, directional only | upstream deeploans' Dutch RMBS deal | published European prime auto ABS ranges |
+
+
+### European CLO — Leveraged Loans
+
+The newest pack and the one that stretched the engine most. If you have not met
+a CLO, the vocabulary is worth five minutes.
+
+**What it models.** A **CLO** is a fund that buys several hundred loans made to
+companies — not to people — and sells shares in the bundle to investors. This
+pack generates *the loans the fund owns*, month by month. It does **not** model
+the fund's own liabilities: no tranches, no waterfall, no OC or IC tests, no
+equity returns. Those are a separate problem and a separate product.
+
+**Facility and obligor.** A **facility** is one loan. An **obligor** is the
+company that borrowed it. One company usually has several facilities, and every
+limit investors care about is stated per *obligor* — which is why the pack groups
+them, and why the industry, country and revenue of a company are shared by all
+its loans rather than drawn separately for each.
+
+**An open pool.** A mortgage pool is sealed: loans only leave. A CLO manager
+actively buys and sells for a few years — the **reinvestment period** — and then
+stops. New facilities join every month until month 24 here, and after that the
+portfolio only runs down.
+
+**Credit migration.** A corporate loan does not go 30, then 60, then 90 days past
+due. It goes on a **watchlist**, becomes **distressed**, and then **defaults**.
+Default is not the end: a **workout** runs for nine months, the facility stays in
+the portfolio throughout, and some of the money comes back.
+
+**Ratings move on their own.** A rating is an opinion about whether a borrower
+*can* pay, not a record of whether it *has*, so it drifts while a facility is
+performing perfectly — and it usually moves first. Measured on this pack, a
+downgrade precedes visible distress about 80% of the time, with a median five
+months of warning. That matters because every CLO indenture caps how much
+CCC-rated collateral the fund may hold, and a rating derived from the credit
+state could only ever confirm what was already obvious.
+
+**Turnover.** Facilities leave four ways: repaid early (**prepaid**), sold by the
+manager, reaching the end of their term (**matured**), or resolved out of default
+(**recovered**). Each is modelled separately because each means something
+different to an investor.
+
+**What you get.** 500 facilities over 36 monthly cut-offs: one loan tape per
+month, a consolidated panel, a 19-figure portfolio report per cut-off, four
+CLO-specific charts, 45 invariants checked, and three stress scenarios.
+
+**What it is not.** Demo calibration. The transition probabilities, recovery
+rates and spreads are plausible and internally consistent; they are not estimates
+of any real market, manager or deal, and the pack must not be described as
+satisfying a particular indenture or rating-agency methodology.
+
+```bash
+sdd run clo_eu_leveraged_loans -n 500 -o ./clo --scenario adverse
+```
 
 ```bash
 sdd run auto_abs_esma_annex5 -n 20000 -o ./auto --scenario severe
@@ -376,7 +434,8 @@ That is the seam a web UI plugs into — the CLI is simply its first consumer.
 
 Honest scope notes:
 
-- Two calibrated packs ship: Dutch residential mortgages and European auto loans.
+- Three calibrated packs ship: European CLO leveraged loans, Dutch residential
+  mortgages and European auto loans.
   CRE, SME and consumer packs are not written yet, though the engine runs them —
   `tests/test_cross_asset_class.py` exercises a quarterly depreciating auto lease
   end to end.

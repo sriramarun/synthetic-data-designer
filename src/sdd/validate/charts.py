@@ -271,6 +271,7 @@ def build_charts(
     reference: str | Path | pd.DataFrame | None = None,
     *,
     columns: list[str] | None = None,
+    metrics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Every chart the results step shows, plus why any of them is missing."""
     from sdd.profile import read_sample
@@ -285,6 +286,7 @@ def build_charts(
         "delinquency": delinquency_curve(spec, frame),
         "ltv": ltv_distribution(spec, frame),
         "pool_balance": pool_balance(spec, frame),
+        "configured": configured_charts(spec, frame, metrics),
         "numeric_columns": _interesting_numeric(spec, frame),
         "has_reference": sample is not None,
     }
@@ -331,3 +333,130 @@ def _interesting_numeric(spec: DesignSpec, frame: pd.DataFrame) -> list[str]:
             others.append(column.name)
 
     return leading + others
+
+
+# ---------------------------------------------------------------------------
+# charts a pack asks for
+# ---------------------------------------------------------------------------
+
+
+def configured_charts(
+    spec: DesignSpec,
+    frame: pd.DataFrame,
+    metrics: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build whatever the spec's `results.charts` declares.
+
+    A series chart reads the metrics table rather than re-aggregating the panel.
+    That is not only cheaper: it means the line drawn on screen is the same
+    number the downloaded report carries, instead of a second calculation of it
+    that can quietly disagree.
+    """
+    if not spec.results.charts:
+        return []
+
+    time_column = spec.entity.time_column
+    built: list[dict[str, Any]] = []
+
+    for chart in spec.results.charts:
+        payload: dict[str, Any] = {
+            "kind": chart.kind,
+            "title": chart.title,
+            "unit": chart.unit,
+            "description": chart.description,
+        }
+        try:
+            data = _one_chart(chart, spec, frame, metrics, time_column)
+        except Exception as exc:
+            payload["unavailable"] = str(exc)
+            built.append(payload)
+            continue
+
+        if data is None:
+            payload["unavailable"] = "nothing to draw from this run"
+        else:
+            payload.update(data)
+        built.append(payload)
+
+    return built
+
+
+def _one_chart(
+    chart: Any,
+    spec: DesignSpec,
+    frame: pd.DataFrame,
+    metrics: list[dict[str, Any]] | None,
+    time_column: str,
+) -> dict[str, Any] | None:
+    if chart.kind == "series":
+        if chart.metric:
+            if not metrics:
+                raise ValueError("this run produced no metrics table")
+            table = pd.DataFrame(metrics)
+            if chart.metric not in table.columns:
+                raise ValueError(f"no metric named {chart.metric!r}")
+            values = pd.to_numeric(table[chart.metric], errors="coerce")
+            return {
+                "periods": [str(d) for d in table["date"]],
+                "values": [None if pd.isna(v) else round(float(v), 6) for v in values],
+                "label": chart.metric,
+            }
+        grouped = frame.groupby(time_column)[chart.column].sum()
+        return {
+            "periods": [str(d) for d in grouped.index],
+            "values": [round(float(v), 6) for v in grouped],
+            "label": chart.column,
+        }
+
+    if chart.kind == "stacked_series":
+        if chart.column not in frame.columns:
+            raise ValueError(f"{chart.column!r} is not in the panel")
+        counts = pd.crosstab(frame[time_column], frame[chart.column], normalize="index")
+        wanted = chart.states or [str(c) for c in counts.columns]
+        series = []
+        for state in wanted:
+            if state in counts.columns:
+                series.append(
+                    {"label": str(state), "values": [round(float(v), 6) for v in counts[state]]}
+                )
+        if not series:
+            return None
+        return {"periods": [str(d) for d in counts.index], "series": series}
+
+    if chart.kind == "category_bar":
+        for name in (chart.group, chart.column):
+            if name not in frame.columns:
+                raise ValueError(f"{name!r} is not in the panel")
+        # The final cut-off: a concentration figure is about the book as it
+        # stands, not summed over every month it stood there.
+        last = frame[frame[time_column] == frame[time_column].max()]
+        totals = (
+            pd.to_numeric(last[chart.column], errors="coerce")
+            .groupby(last[chart.group])
+            .sum()
+            .sort_values(ascending=False)
+        )
+        total = float(totals.sum())
+        if total <= 0:
+            return None
+        return {
+            "categories": [str(k) for k in totals.index],
+            "values": [round(float(v), 6) for v in totals],
+            "shares": [round(float(v) / total, 6) for v in totals],
+            "as_of": str(last[time_column].iloc[0]),
+        }
+
+    if chart.kind == "histogram":
+        if chart.column not in frame.columns:
+            raise ValueError(f"{chart.column!r} is not in the panel")
+        values = pd.to_numeric(frame[chart.column], errors="coerce").dropna()
+        if values.empty:
+            return None
+        counts, edges = np.histogram(values, bins=min(30, max(6, values.nunique())))
+        return {
+            "edges": [round(float(e), 6) for e in edges],
+            "counts": [int(c) for c in counts],
+            "stats": _summary(values),
+        }
+
+    raise ValueError(f"unknown chart kind {chart.kind!r}")
