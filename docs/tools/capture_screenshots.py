@@ -70,4 +70,6 @@ with sync_playwright() as p:
 
 print()
 for name, description in shots:
-    print(f"| [{description.split(' — ')[0]}](screenshots/{name}) | {description.split(' — ', 1)[-1]} |")
+    print(
+        f"| [{description.split(' — ')[0]}](screenshots/{name}) | {description.split(' — ', 1)[-1]} |"
+    )

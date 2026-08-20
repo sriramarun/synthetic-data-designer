@@ -582,3 +582,72 @@ details.group > summary:focus-visible { outline: 2px solid var(--accent); outlin
   padding: 2px 8px;
   white-space: nowrap;
 }
+
+/* ------------------------------------------------------- chart hover + help
+   A line with an axis tells you the shape and refuses to tell you the number.
+   These two put the number and the vocabulary within reach without cluttering
+   the chart itself: one appears on hover, the other on request. */
+
+.chart-host { position: relative; }
+
+.hover-zone { cursor: crosshair; outline: none; }
+.hover-zone:focus-visible { fill: var(--accent); fill-opacity: .07; }
+.hover-dot { fill: var(--panel); stroke: var(--accent); stroke-width: 2; pointer-events: none; }
+
+.chart-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 108px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.chart-tip b { display: block; color: var(--ink); font-weight: 600; }
+.chart-tip span { display: flex; justify-content: space-between; gap: 14px; }
+.chart-tip span b { display: inline; }
+
+.help-wrap { position: relative; display: inline-flex; margin-left: 8px; }
+
+.help-btn {
+  width: 17px; height: 17px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-2);
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.help-btn:hover { color: var(--accent); border-color: var(--accent); }
+.help-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.chart-help {
+  position: absolute;
+  top: 24px;
+  left: -10px;
+  z-index: 6;
+  width: min(360px, 74vw);
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  text-align: left;
+  font-weight: 400;
+}
+.chart-help strong { display: block; color: var(--ink); margin-bottom: 5px; font-size: 13px; }
+.chart-help p { margin: 0; }
