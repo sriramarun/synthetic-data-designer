@@ -59,6 +59,11 @@ def test_the_tapes_have_their_own_folder(run):
 
 
 def test_nothing_is_left_loose_in_the_run_root(run):
+    """Pins the layout, so anything new has to be a decision rather than a spill.
+
+    It caught the metrics report arriving, which §23 lists under "where
+    supported, also provide" — an intended addition, so it is named here.
+    """
     _, out = run
     expected = {
         "all_cutoffs.parquet",
@@ -66,6 +71,8 @@ def test_nothing_is_left_loose_in_the_run_root(run):
         "run_manifest.json",
         "validation_report.html",
         "validation_report.json",
+        "portfolio_metrics.parquet",
+        "portfolio_metrics.csv",
     }
     loose = {f for f in _files(out) if "/" not in f}
     assert loose == expected

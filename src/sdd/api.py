@@ -867,6 +867,7 @@ def run(
         "files": result["files"],
         "panel": result["panel"],
         "mix": result["mix"],
+        "metrics": result.get("metrics") or [],
         "validation": report,
         "timings": {
             "book_seconds": round(book_seconds, 2),

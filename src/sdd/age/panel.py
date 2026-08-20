@@ -182,12 +182,24 @@ def run_ageing(
     current = book.copy().reset_index(drop=True)
     dwell = engine.initial_dwell(len(current), engine.to_idx(current[lc.state_column].to_numpy()))
     accrual_counters = seed_accrual_counters(current, spec.dynamics.accruals, _dpd_column(spec))
-    for chain in chains:
-        chain.seed(current, rng)
+    # The opening states have to reach the opening book, not just the chain's
+    # own arrays. Seeded but unwritten, period 0 carried whatever the column's
+    # generator produced — every facility rated "B" from a constant — and the
+    # declared opening mix only appeared from period 1. Anything derived from
+    # the column, the CCC flag among it, was wrong for exactly one cut-off,
+    # which is the hardest kind of wrong to notice.
+    if chains:
+        for chain in chains:
+            chain.seed(current, rng)
+            current = chain.write(current)
+        current = apply_derivations(spec, current, stage="both", extra={**spec.params, "period": 0})
+        current = coerce_dtypes(spec, current)
 
     written: list[str] = []
     mixes: list[dict] = []
     frames: list[pd.DataFrame] = []
+    metric_rows: list[dict] = []
+    running_totals: dict[str, float] = {}
 
     opening_size = len(current)
     # Identifiers continue from the opening book, so a later cohort cannot be
@@ -254,6 +266,17 @@ def run_ageing(
                 "is capped."
             )
 
+        # Computed on the frame about to be written, so the figures are of
+        # exactly the rows they describe. Recomputing them from the finished
+        # panel would be a second implementation of the same arithmetic, which
+        # is how a report and its data drift apart.
+        if spec.metrics:
+            from sdd import metrics as metrics_module
+
+            metric_rows.append(
+                metrics_module.compute(spec, out, period, date.strftime("%Y-%m-%d"), running_totals)
+            )
+
         mix = current[lc.state_column].value_counts().to_dict()
         mixes.append(
             {
@@ -289,9 +312,20 @@ def run_ageing(
         panel_path = out_path / spec.emit.panel_filename
         panel.to_parquet(panel_path, index=False)
 
+    metrics_path = None
+    if spec.metrics and metric_rows and write_files:
+        from sdd import metrics as metrics_module
+
+        table = metrics_module.to_frame(metric_rows)
+        metrics_path = out_path / "portfolio_metrics.parquet"
+        table.to_parquet(metrics_path, index=False)
+        table.to_csv(out_path / "portfolio_metrics.csv", index=False)
+
     return {
         "periods": len(mixes),
         "files": written,
+        "metrics": metric_rows,
+        "metrics_path": str(metrics_path) if metrics_path else None,
         "panel": str(panel_path) if panel_path else None,
         "mix": mixes,
         "final_rows": len(current),
