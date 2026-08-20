@@ -412,7 +412,23 @@ async function loadPacks() {
     list.append(el("p", { class: "hint", text: "No packs are bundled with this build." }));
     return;
   }
+  const broken = meta.pack_problems || {};
   for (const name of meta.packs) {
+    // A pack the server cannot load is shown as unavailable, with the reason.
+    // Listing it and letting the click fail is how a stale process reads as a
+    // dead button.
+    if (broken[name]) {
+      list.append(el("div", { class: "pack broken" }, [
+        el("span", { class: "pack-text" }, [
+          el("div", { class: "name" }, [
+            el("span", { text: name }),
+            el("span", { class: "star warn", text: "unavailable" }),
+          ]),
+          ...broken[name].map((reason) => el("div", { class: "m", text: reason })),
+        ]),
+      ]));
+      continue;
+    }
     const info = await call(`/api/packs/${name}`);
     const summary = info.summary;
     list.append(el("button", {

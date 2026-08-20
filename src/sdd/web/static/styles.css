@@ -651,3 +651,11 @@ details.group > summary:focus-visible { outline: 2px solid var(--accent); outlin
 }
 .chart-help strong { display: block; color: var(--ink); margin-bottom: 5px; font-size: 13px; }
 .chart-help p { margin: 0; }
+
+/* A pack the server could not load. Shown rather than hidden: the picker is
+   where you would go to find out something is broken, and an absence explains
+   nothing. */
+.pack.broken { cursor: default; opacity: .85; border-style: dashed; }
+.pack.broken .name { color: var(--warn); }
+.pack.broken .m { color: var(--ink-2); white-space: normal; line-height: 1.5; }
+.star.warn { color: var(--warn); border-color: var(--warn); }
