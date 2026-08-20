@@ -1186,6 +1186,12 @@ results:
       metric: collateral_par
       unit: money
       description: Collateral held, cut-off by cut-off. It runs down once reinvestment ends.
+      explain: >-
+        "Par" is the face value of the loans the fund holds — what the borrowers owe, not
+        what the loans would fetch if sold. The line is flat while the manager is still
+        buying (the reinvestment period, 24 months here) because every loan that leaves is
+        replaced. After that nothing is replaced, so each repayment, sale or default shrinks
+        the portfolio and the line falls away.
 
     - kind: stacked_series
       title: Credit state
@@ -1194,6 +1200,13 @@ results:
       unit: percent
       description: Share of facilities in each state. The terminal states are excluded — they
         leave the pool, so stacking them would double-count exits.
+      explain: >-
+        A company loan does not fall behind in 30-day steps the way a mortgage does. It goes
+        on the manager's WATCHLIST when something looks wrong, becomes DISTRESSED when the
+        business is in real trouble, and DEFAULTS when it stops paying or restructures. Each
+        band is the share of loans sitting in that state at that month. Loans that leave —
+        repaid, sold, matured, or resolved out of default — are not shown, which is why the
+        bands need not reach 100%.
 
     - kind: series
       title: CCC share of par
@@ -1201,6 +1214,15 @@ results:
       unit: percent
       description: The bucket every indenture caps. It rises as credit migrates, independently
         of how many facilities are visibly distressed.
+      explain: >-
+        Every loan carries a credit rating — a letter grade from an agency saying how likely
+        the borrower is to keep paying. They run BB (best here) down through B to CCC, and
+        finally D for a borrower already in default. CCC means "vulnerable": still paying,
+        but the agency thinks it may not for much longer. This line is the share of the
+        portfolio rated CCC or worse. It matters because a CLO's own rulebook caps how much
+        CCC it may hold, and breaching that cap diverts cash away from the investors at the
+        bottom. Ratings move on their own here, so this can climb well before any loan is
+        visibly in trouble — which is the early warning a rating is for.
 
     - kind: category_bar
       title: Industry concentration
@@ -1208,6 +1230,13 @@ results:
       column: current_par
       unit: money
       description: Par by industry at the final cut-off.
+      explain: >-
+        How the portfolio is spread across industries, at the last reporting date. A fund
+        holding a quarter of its money in one sector is exposed to whatever happens to that
+        sector, however healthy each individual borrower looks — retail in 2018 and energy
+        in 2020 are the usual examples. Only the final cut-off is shown, because
+        concentration is about the book as it stands rather than summed over every month it
+        stood there.
 
 emit:
   filename: "synthetic_clo_{yyyymm}.csv"

@@ -364,6 +364,7 @@ def configured_charts(
             "title": chart.title,
             "unit": chart.unit,
             "description": chart.description,
+            "explain": chart.explain,
         }
         try:
             data = _one_chart(chart, spec, frame, metrics, time_column)

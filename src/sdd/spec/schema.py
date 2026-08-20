@@ -1436,7 +1436,15 @@ class ChartSpec(_Base):
         default=None, description="Which values to stack, in order. Defaults to all of them."
     )
     unit: Literal["money", "percent", "count", "number"] = "number"
-    description: str | None = None
+    description: str | None = Field(
+        default=None, description="One line under the title, saying what is plotted."
+    )
+    explain: str | None = Field(
+        default=None,
+        description="A longer note behind an information icon, for a reader who does not "
+        "already know the vocabulary. A chart labelled 'CCC share' means nothing to someone "
+        "who has never met a credit rating, and the one-line description has no room to say so.",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> ChartSpec:

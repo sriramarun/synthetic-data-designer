@@ -1877,6 +1877,66 @@ async function boot() {
 
 boot();
 
+
+/* Hovering a chart.
+ *
+ * A line with an axis tells you the shape and refuses to tell you the number.
+ * Every chart here gets an invisible column per data point, so the pointer does
+ * not have to find a 2px line, and a small panel follows it with the figure.
+ *
+ * Keyboard reaches it too: the hit zones are focusable, so tabbing across a
+ * chart reads out the same values a mouse would.
+ */
+function hoverLayer(host, f) {
+  const tip = el("div", { class: "chart-tip", hidden: true });
+  host.append(tip);
+
+  const marker = svgNode("circle", { r: 3.5, class: "hover-dot", visibility: "hidden" });
+  f.svg.append(marker);
+
+  const show = (clientLeft, clientTop, html) => {
+    tip.innerHTML = html;
+    tip.hidden = false;
+    const box = host.getBoundingClientRect();
+    const width = tip.offsetWidth;
+    // Flip to the left near the right edge, so the panel never leaves the card.
+    let x = clientLeft - box.left + 14;
+    if (x + width > box.width - 6) x = clientLeft - box.left - width - 14;
+    tip.style.left = `${Math.max(4, x)}px`;
+    tip.style.top = `${Math.min(clientTop - box.top + 12, box.height - 12)}px`;
+  };
+
+  return {
+    hide() {
+      tip.hidden = true;
+      marker.setAttribute("visibility", "hidden");
+    },
+    /** One hit zone. `dot` is where to park the marker, if anywhere. */
+    zone({ x, y, width, height, html, dot, label }) {
+      const hit = svgNode("rect", {
+        x, y, width: Math.max(width, 1), height: Math.max(height, 1),
+        fill: "transparent", class: "hover-zone", tabindex: "0", role: "img",
+        "aria-label": label,
+      });
+      const enter = (event) => {
+        const point = event.touches?.[0] || event;
+        const box = f.svg.getBoundingClientRect();
+        show(point.clientX ?? box.left + x + width / 2, point.clientY ?? box.top + y, html);
+        if (dot) {
+          marker.setAttribute("cx", dot[0]);
+          marker.setAttribute("cy", dot[1]);
+          marker.setAttribute("visibility", "visible");
+        }
+      };
+      hit.addEventListener("mousemove", enter);
+      hit.addEventListener("focus", enter);
+      hit.addEventListener("mouseleave", () => tip.hidden = true);
+      hit.addEventListener("blur", () => tip.hidden = true);
+      f.svg.append(hit);
+    },
+  };
+}
+
 /* Charts a pack asked for.
  *
  * The four drawn before this were fixed here and named for a mortgage — a
@@ -1908,7 +1968,10 @@ function renderPackCharts(configured) {
     }
     const body = el("div", { class: "chart-host" });
     row.append(el("div", { class: "card" }, [
-      el("div", { class: "card-head" }, [el("h2", { text: chart.title })]),
+      el("div", { class: "card-head" }, [
+        el("h2", { text: chart.title }),
+        chart.explain ? helpButton(chart.title, chart.explain) : null,
+      ].filter(Boolean)),
       chart.description ? el("p", { class: "hint", text: chart.description }) : null,
       body,
     ].filter(Boolean)));
@@ -1927,6 +1990,34 @@ function renderPackCharts(configured) {
       empty(body, error.message);
     }
   });
+}
+
+
+/* An explanation, for a reader who does not have the vocabulary.
+ *
+ * "CCC share of par" is four words of jargon and a preposition. The one-line
+ * description under a title has no room to unpack it, and a chart nobody can
+ * read is a chart nobody uses.
+ */
+function helpButton(title, text) {
+  const panel = el("div", { class: "chart-help", hidden: true }, [
+    el("strong", { text: title }),
+    el("p", { text }),
+  ]);
+  const button = el("button", {
+    class: "help-btn", type: "button", "aria-label": `What ${title} means`,
+    "aria-expanded": "false", text: "i",
+    onclick: (event) => {
+      event.stopPropagation();
+      const opening = panel.hidden;
+      // One at a time: two open panels overlap and neither is readable.
+      $$(".chart-help").forEach((other) => { other.hidden = true; });
+      $$(".help-btn").forEach((other) => other.setAttribute("aria-expanded", "false"));
+      panel.hidden = !opening;
+      button.setAttribute("aria-expanded", String(opening));
+    },
+  });
+  return el("span", { class: "help-wrap" }, [button, panel]);
 }
 
 function axisFormat(unit) {
@@ -1959,6 +2050,20 @@ function renderSeries(host, chart) {
   }));
 
   xLabels(f, chart.periods.map((d) => String(d).slice(0, 7)), 6);
+
+  const hover = hoverLayer(host, f);
+  const slice = f.innerW / n;
+  values.forEach((v, i) => {
+    hover.zone({
+      x: x(i) - slice / 2, y: f.pad.t, width: slice, height: f.innerH,
+      dot: [x(i), y(v)],
+      label: `${chart.periods[i]}: ${format(v)}`,
+      html: `<b>${escapeHtml(String(chart.periods[i]).slice(0, 10))}</b>` +
+            `<span>${escapeHtml(format(v))}</span>`,
+    });
+  });
+  host.addEventListener("mouseleave", hover.hide);
+
   host.append(el("div", { class: "chart-stats" }, [
     el("span", { text: `first ${format(values[0])}` }),
     el("span", { text: `last ${format(values[n - 1])}` }),
@@ -1993,6 +2098,24 @@ function renderStacked(host, chart) {
 
   xLabels(f, chart.periods.map((d) => String(d).slice(0, 7)), 6);
   legend(host, chart.series.map((s, i) => [s.label, PALETTE[i % PALETTE.length]]));
+
+  // One zone per period listing every band, rather than one per band: at these
+  // heights the thin ones are a pixel or two and impossible to point at.
+  const hover = hoverLayer(host, f);
+  const slice = f.innerW / n;
+  chart.periods.forEach((period, i) => {
+    const rows = chart.series
+      .map((series) => `<span>${escapeHtml(series.label)}` +
+                       `<b>${(series.values[i] * 100).toFixed(1)}%</b></span>`)
+      .join("");
+    hover.zone({
+      x: x(i) - slice / 2, y: f.pad.t, width: slice, height: f.innerH,
+      label: `${period}: ${chart.series.map((sr) =>
+        `${sr.label} ${(sr.values[i] * 100).toFixed(1)}%`).join(", ")}`,
+      html: `<b>${escapeHtml(String(period).slice(0, 10))}</b>${rows}`,
+    });
+  });
+  host.addEventListener("mouseleave", hover.hide);
 }
 
 function renderCategoryBar(host, chart) {
@@ -2013,15 +2136,33 @@ function renderCategoryBar(host, chart) {
       x: f.pad.l, y: top, width: Math.max(width, 1), height,
       fill: PALETTE[0], "fill-opacity": 0.8, rx: 2,
     }));
-    f.svg.append(svgNode("text", {
-      x: f.pad.l - 8, y: top + height / 2 + 4, "text-anchor": "end",
-      class: "tick", text: label.length > 18 ? `${label.slice(0, 17)}…` : label,
-    }));
-    f.svg.append(svgNode("text", {
-      x: f.pad.l + Math.max(width, 1) + 6, y: top + height / 2 + 4,
-      class: "tick", text: `${(chart.shares[i] * 100).toFixed(1)}%`,
-    }));
+    // `svgNode` sets everything it is given as an *attribute*, so a `text:` key
+    // became text="Software" — which SVG ignores, and every category name was
+    // silently absent. Text content has to be assigned, not passed.
+    const name = svgNode("text", {
+      x: f.pad.l - 8, y: top + height / 2 + 4, "text-anchor": "end", class: "tick",
+    });
+    name.textContent = label.length > 20 ? `${label.slice(0, 19)}…` : label;
+    f.svg.append(name);
+
+    const share = svgNode("text", {
+      x: f.pad.l + Math.max(width, 1) + 6, y: top + height / 2 + 4, class: "tick",
+    });
+    share.textContent = `${(chart.shares[i] * 100).toFixed(1)}%`;
+    f.svg.append(share);
   });
+  const hover = hoverLayer(host, f);
+  shown.forEach((label, i) => {
+    hover.zone({
+      x: f.pad.l, y: f.pad.t + i * rowHeight, width: f.innerW, height: rowHeight,
+      label: `${label}: ${format(chart.values[i])}, ${(chart.shares[i] * 100).toFixed(1)}%`,
+      html: `<b>${escapeHtml(label)}</b>` +
+            `<span>${escapeHtml(format(chart.values[i]))}</span>` +
+            `<span>${(chart.shares[i] * 100).toFixed(1)}% of the book</span>`,
+    });
+  });
+  host.addEventListener("mouseleave", hover.hide);
+
   host.append(el("div", { class: "chart-stats" }, [
     el("span", { text: `${chart.categories.length} categories` }),
     el("span", { text: `largest ${(chart.shares[0] * 100).toFixed(1)}%` }),
@@ -2044,5 +2185,19 @@ function renderHistogram(host, chart) {
     }));
   });
   xLabels(f, chart.edges.slice(0, -1).map((e) => Number(e).toFixed(0)), 7);
+
+  const hover = hoverLayer(host, f);
+  const total = chart.counts.reduce((a, b) => a + b, 0) || 1;
+  chart.counts.forEach((count, i) => {
+    const from = Number(chart.edges[i]).toFixed(0);
+    const to = Number(chart.edges[i + 1]).toFixed(0);
+    hover.zone({
+      x: x(i), y: f.pad.t, width: f.innerW / n, height: f.innerH,
+      label: `${from} to ${to}: ${count}`,
+      html: `<b>${from} – ${to}</b><span>${fmt.int(count)} rows</span>` +
+            `<span>${((count / total) * 100).toFixed(1)}%</span>`,
+    });
+  });
+  host.addEventListener("mouseleave", hover.hide);
 }
 
