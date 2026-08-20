@@ -1335,6 +1335,67 @@ class SecondaryChain(_Base):
         return self
 
 
+# ---------------------------------------------------------------------------
+# metrics — the portfolio, summarised each cut-off
+# ---------------------------------------------------------------------------
+
+
+MetricKind = Literal[
+    "sum",  # add a column up
+    "count",  # how many rows
+    "distinct_count",  # how many different values
+    "weighted_mean",  # average, weighted by another column
+    "share_where",  # what fraction of a total meets a condition
+    "max_group_share",  # the largest single group's share of a total
+    "cumulative",  # a running total across cut-offs
+]
+
+
+class Metric(_Base):
+    """One figure, computed for every cut-off.
+
+    The panel says what each loan did. A portfolio report says what the *book*
+    did — its size, its average coupon, how much of it is in trouble, how
+    concentrated it is. Those are the numbers an investor reads, and until now
+    the engine reported only a count of entities per state.
+
+    Deliberately seven kinds rather than an expression language. Every figure the
+    CLO specification asks for is one of these, and a metric that has to be
+    readable by whoever inherits the spec is better as a named shape than as
+    arbitrary code.
+    """
+
+    name: str = Field(description="Column name in the metrics table.")
+    kind: MetricKind
+    column: str | None = Field(
+        default=None, description="The column being measured. Not needed by `count`."
+    )
+    weight: str | None = Field(default=None, description="Weighting column, for `weighted_mean`.")
+    group: str | None = Field(default=None, description="Grouping column, for `max_group_share`.")
+    where: str | None = Field(
+        default=None,
+        description="Expression restricting which rows count, e.g. \"ccc_flag == 'Y'\". For "
+        "`share_where` it selects the numerator; elsewhere it filters the whole figure.",
+    )
+    decimals: int | None = Field(default=None, ge=0, description="Round the result.")
+    description: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> Metric:
+        if self.kind != "count" and not self.column:
+            raise ValueError(f"metric {self.name!r} of kind {self.kind!r} needs a `column`")
+        if self.kind == "weighted_mean" and not self.weight:
+            raise ValueError(
+                f"metric {self.name!r} is a weighted mean with no `weight`. An unweighted "
+                "average of a portfolio treats a EUR 40m facility and a EUR 400k one alike"
+            )
+        if self.kind == "max_group_share" and not self.group:
+            raise ValueError(f"metric {self.name!r} is a group share with no `group`")
+        if self.kind == "share_where" and not self.where:
+            raise ValueError(f"metric {self.name!r} is a share with no `where` to share on")
+        return self
+
+
 class DesignSpec(_Base):
     spec_version: int = SPEC_VERSION
     meta: Meta
@@ -1360,6 +1421,10 @@ class DesignSpec(_Base):
     )
     originations: Originations | None = None
     scenarios: dict[str, Scenario] = Field(default_factory=dict)
+    metrics: list[Metric] = Field(
+        default_factory=list,
+        description="Portfolio-level figures computed at every cut-off.",
+    )
     emit: Emit = Field(default_factory=Emit)
     validation: Validation = Field(default_factory=Validation)
 

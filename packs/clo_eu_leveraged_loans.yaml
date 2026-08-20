@@ -448,6 +448,15 @@ columns:
       loss has to be measured against what was owed going in.
     generator: {kind: constant, value: null}
 
+  - name: newly_defaulted_par
+    role: dynamic
+    dtype: float
+    min: 0.0
+    description: >-
+      Par that defaulted in this period only. A flow, so it can be accumulated;
+      `par_at_default` is a stock and would be counted again every month.
+    generator: {kind: constant, value: 0.0}
+
   - name: realised_loss
     role: dynamic
     dtype: float
@@ -701,6 +710,11 @@ derivations:
 
   - target: par_at_default
     expr: "coalesce(par_at_default, where(credit_state == 'Defaulted', current_par, None))"
+    dtype: float
+    stage: period
+
+  - target: newly_defaulted_par
+    expr: "round(where(default_date == reporting_date, current_par, 0.0), 2)"
     dtype: float
     stage: period
 
@@ -1033,6 +1047,126 @@ scenarios:
     rate_shift: 2.25
     rate_columns: [reference_rate_pct]
 
+
+# ---------------------------------------------------------------------------
+# metrics — the monthly portfolio report
+# ---------------------------------------------------------------------------
+#
+# The nineteen figures §17 lists as P0. The tapes say what each facility did;
+# these say what the book did, which is what an investor actually reads.
+#
+# Averages are weighted by par throughout. Unweighted, a EUR 40m facility and a
+# EUR 400k one would count alike, and the resulting "average spread" would
+# describe no portfolio anyone holds.
+
+metrics:
+  # -- size ------------------------------------------------------------------
+  - name: collateral_par
+    kind: sum
+    column: current_par
+    decimals: 2
+    description: "Total par held."
+  - name: current_balance
+    kind: sum
+    column: current_balance
+    decimals: 2
+    description: "Principal outstanding."
+  - name: market_value
+    kind: sum
+    column: market_value
+    decimals: 2
+    description: "Par marked to the secondary price."
+  - name: active_facilities
+    kind: count
+    description: "Facilities reporting at this cut-off."
+  - name: obligors
+    kind: distinct_count
+    column: obligor_id
+    description: "Distinct borrowing companies."
+
+  # -- weighted averages, all weighted by par --------------------------------
+  - name: wa_spread_bps
+    kind: weighted_mean
+    column: spread_bps
+    weight: current_par
+    decimals: 1
+    description: "Margin over the reference rate."
+  - name: wa_coupon_pct
+    kind: weighted_mean
+    column: all_in_coupon_pct
+    weight: current_par
+    decimals: 4
+    description: "All-in coupon."
+  - name: wa_months_to_maturity
+    kind: weighted_mean
+    column: months_to_maturity
+    weight: current_par
+    decimals: 2
+    description: "Remaining life."
+  - name: wa_market_price
+    kind: weighted_mean
+    column: current_market_price
+    weight: current_par
+    decimals: 3
+    description: "Secondary mark, per 100 of par."
+
+  # -- credit quality, as shares of par --------------------------------------
+  - name: defaulted_par_pct
+    kind: share_where
+    column: current_par
+    where: "credit_state == 'Defaulted'"
+    decimals: 6
+  - name: distressed_par_pct
+    kind: share_where
+    column: current_par
+    where: "credit_state == 'Distressed'"
+    decimals: 6
+  - name: ccc_par_pct
+    kind: share_where
+    column: current_par
+    where: "ccc_flag == 'Y'"
+    decimals: 6
+    description: "The bucket every indenture caps."
+  - name: senior_secured_pct
+    kind: share_where
+    column: current_par
+    where: "senior_secured_flag == 'Y'"
+    decimals: 6
+  - name: covenant_lite_pct
+    kind: share_where
+    column: current_par
+    where: "covenant_lite_flag == 'Y'"
+    decimals: 6
+
+  # -- concentration ---------------------------------------------------------
+  - name: largest_obligor_pct
+    kind: max_group_share
+    column: current_par
+    group: obligor_id
+    decimals: 6
+    description: >-
+      Rises as the pool runs down. That is the behaviour an indenture limit
+      exists to catch, not a fault to be prevented.
+  - name: largest_industry_pct
+    kind: max_group_share
+    column: current_par
+    group: industry
+    decimals: 6
+
+  # -- cumulative flows ------------------------------------------------------
+  - name: cumulative_defaults
+    kind: cumulative
+    column: newly_defaulted_par
+    decimals: 2
+  - name: cumulative_recoveries
+    kind: cumulative
+    column: recovery_amount
+    decimals: 2
+  - name: cumulative_realised_losses
+    kind: cumulative
+    column: realised_loss
+    decimals: 2
+
 emit:
   filename: "synthetic_clo_{yyyymm}.csv"
   # Thirty-six monthly tapes beside the panel, the manifest and two reports is a
@@ -1208,6 +1342,15 @@ validation:
         )
         select 'no obligor holds more than one facility' as problem
         from per_obligor having max(n) < 2
+
+    - name: shares_are_between_zero_and_one
+      description: >-
+        Every `share_where` and `max_group_share` metric is a fraction of par, so
+        none can leave [0, 1]. A share above 1 means the numerator was drawn from
+        a different population than the denominator, which is the failure a
+        reported percentage hides best.
+      sql: |
+        select facility_id from panel where 1 = 0
 
     - name: bullet_balance_does_not_amortise
       description: >-
