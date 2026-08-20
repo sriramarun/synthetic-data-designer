@@ -36,6 +36,7 @@ spec_version: 1
 
 meta:
   name: clo_eu_leveraged_loans
+  entity_noun: facility
   display_order: 1
   featured: true
   title: European CLO — Leveraged Loans

@@ -64,6 +64,17 @@ class Meta(_Base):
         default=None,
         description="Where this spec came from — a pack name, or the sample file it was profiled from.",
     )
+    entity_noun: str | None = Field(
+        default=None,
+        description="What one row of the opening book is called, singular — 'facility', "
+        "'plan', 'invoice'. The interface uses it wherever it counts them, so a pack reads "
+        "in its own vocabulary instead of everything being a loan.",
+    )
+    entity_noun_plural: str | None = Field(
+        default=None,
+        description="Plural of `entity_noun`, when adding an 's' is wrong. Defaults to a "
+        "simple rule, which handles 'plans' and 'invoices' and not 'facilities'.",
+    )
     display_order: int | None = Field(
         default=None,
         description="Where this pack sits in the picker. Lower comes first; packs without one "
@@ -75,6 +86,19 @@ class Meta(_Base):
         description="Mark this pack as the one to try first. At most one should carry it — "
         "highlighting everything highlights nothing.",
     )
+
+
+def plural_of(noun: str) -> str:
+    """Enough English to cover the nouns lending uses.
+
+    Deliberately small: a pack whose plural this gets wrong says so explicitly
+    rather than waiting for the rule to grow a special case.
+    """
+    if noun.endswith("y") and not noun.endswith(("ay", "ey", "iy", "oy", "uy")):
+        return noun[:-1] + "ies"
+    if noun.endswith(("s", "x", "z", "ch", "sh")):
+        return noun + "es"
+    return noun + "s"
 
 
 class Calendar(_Base):
