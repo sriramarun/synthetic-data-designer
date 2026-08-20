@@ -97,6 +97,7 @@ class DatasetProfile:
     periods: int
     entities: int
     is_panel: bool
+    opening_entities: int = 0
     detection_notes: dict[str, str] = field(default_factory=dict)
     dynamics: dict[str, Any] = field(default_factory=dict)
     derived: list[Any] = field(default_factory=list)
@@ -113,6 +114,7 @@ class DatasetProfile:
         return {
             "rows": self.rows,
             "entities": self.entities,
+            "opening_entities": self.opening_entities,
             "periods": self.periods,
             "is_panel": self.is_panel,
             "id_column": self.id_column,
@@ -587,6 +589,18 @@ def profile_dataset(
     )
     columns = [profile_column(df, c, id_column, is_panel, first_period) for c in df.columns]
 
+    # How many entities the book *opened* with, which is not how many it ever
+    # held. A pool that reinvests acquires assets as it goes, so the panel-wide
+    # count runs well ahead of the opening one — 538 facilities seen against 250
+    # on day one, in a run measured here. Anything describing the opening book
+    # has to divide by the smaller number or it states a portfolio that never
+    # existed at any one moment.
+    opening_entities = entities
+    if first_period is not None and not first_period.empty:
+        opening_entities = (
+            int(first_period[id_column].nunique()) if id_column else len(first_period)
+        )
+
     profile = DatasetProfile(
         rows=len(df),
         columns=columns,
@@ -595,6 +609,7 @@ def profile_dataset(
         periods=periods,
         entities=entities,
         is_panel=is_panel,
+        opening_entities=opening_entities,
         detection_notes=notes,
     )
 

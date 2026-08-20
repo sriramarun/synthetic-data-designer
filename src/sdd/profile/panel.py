@@ -101,13 +101,29 @@ def learn_panel_dynamics(
 
 
 def detect_by_name(
-    df: pd.DataFrame, profile: DatasetProfile, hints: tuple[str, ...], *, dynamic_only: bool = False
+    df: pd.DataFrame,
+    profile: DatasetProfile,
+    hints: tuple[str, ...],
+    *,
+    dynamic_only: bool = False,
+    numeric_only: bool = False,
 ) -> str | None:
-    """First column whose name contains one of ``hints``, preferring exact matches."""
+    """First column whose name contains one of ``hints``, preferring exact matches.
+
+    ``numeric_only`` is not a refinement, it is a correctness guard. Matching on
+    the name alone picked `interest_rate_type` — which holds "Fixed" and
+    "Floating" — as an amortisation rate, because it contains "interest_rate"
+    and came first. The spec that produced validated cleanly and then died on
+    `.astype(float)` mid-run, so the failure surfaced nowhere near its cause.
+
+    A column standing in for a rate, a payment or a term has to hold numbers.
+    """
     candidates = [
         c.name
         for c in profile.columns
-        if (not dynamic_only or c.role == "dynamic") and c.name in df.columns
+        if (not dynamic_only or c.role == "dynamic")
+        and c.name in df.columns
+        and (not numeric_only or _holds_numbers(df[c.name]))
     ]
     for hint in hints:
         for name in candidates:
@@ -118,6 +134,17 @@ def detect_by_name(
             if hint in name.lower():
                 return name
     return None
+
+
+def _holds_numbers(series: pd.Series) -> bool:
+    """Whether a column is usable as a number, judged on its values.
+
+    Not on its declared dtype: a tape read from CSV arrives as object, and a
+    perfectly good rate column would be rejected for having been parsed loosely.
+    """
+    numeric = pd.to_numeric(series, errors="coerce")
+    observed = series.notna().sum()
+    return bool(observed) and numeric.notna().sum() / observed > 0.95
 
 
 def detect_state_column(df: pd.DataFrame, profile: DatasetProfile) -> str | None:
@@ -579,7 +606,9 @@ def learn_amortisation(
     ratio = (curr[moving] / prev[moving]).median()
     absolute = (prev[moving] - curr[moving]).median()
 
-    rate_column = detect_by_name(ordered, profile, ("interest_rate", "rate", "coupon"))
+    rate_column = detect_by_name(
+        ordered, profile, ("interest_rate", "rate", "coupon"), numeric_only=True
+    )
     payment_column = detect_by_name(
         ordered, profile, ("scheduled_monthly_payment", "payment", "instalment", "installment")
     )
@@ -590,6 +619,7 @@ def learn_amortisation(
         ordered,
         profile,
         ("remaining_term_months", "remaining_term", "months_to_maturity", "term_months", "term"),
+        numeric_only=True,
     )
 
     # An annuity retires a growing slice of principal each period, so the

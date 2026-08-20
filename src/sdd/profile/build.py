@@ -22,6 +22,7 @@ from sdd.spec.schema import (
     Amortisation,
     Bucket,
     Calendar,
+    ChartSpec,
     Column,
     CorrelationTarget,
     Counter,
@@ -34,7 +35,10 @@ from sdd.spec.schema import (
     Index,
     Lifecycle,
     Meta,
+    Metric,
     Originations,
+    Results,
+    Target,
     Validation,
 )
 
@@ -124,6 +128,12 @@ def spec_from_profile(
         ),
         validation=Validation(non_negative_columns=_non_negative(profile)),
     )
+
+    # One of these is measured and two are proposed, and the difference matters
+    # enough that each function says which it is.
+    spec.entity.targets = _build_targets(profile, spec)
+    spec.metrics = _build_metrics(profile, spec)
+    spec.results = _build_results(spec)
 
     if review:
         spec.meta.description = (
@@ -479,3 +489,209 @@ def build_spec(
     )
     spec = spec_from_profile(profile, template=tmpl, name=name, periods=periods, **kwargs)
     return spec, profile
+
+
+# ---------------------------------------------------------------------------
+# targets, metrics and charts
+# ---------------------------------------------------------------------------
+
+
+def _build_targets(profile: DatasetProfile, spec: DesignSpec) -> list[Target]:
+    """The size of the opening book. Measured.
+
+    This one is a real observation. The tape says what the portfolio came to on
+    day one; a spec without it regenerates to whatever the draws happen to sum
+    to, and the deal size stops being something anyone chose.
+
+    Two things make it more than bookkeeping. A distribution fit lands near the
+    observed mean but rarely on it — a lognormal fitted to balances is a couple
+    of per cent out in either direction — and the target corrects that drift
+    back onto the number that was actually measured. And it turns portfolio size
+    into a knob: edit `total` and the generator rescales, instead of hunting for
+    the parameter that happens to control it.
+
+    Only emitted where it would work. `apply_targets` scales a generator by its
+    closed-form mean, and raises on a generator that has none; a target learned
+    onto a resampled column would fail every regeneration rather than the run
+    that wrote it, which is the worst place to put a failure.
+    """
+    from sdd.generate.targets import _expected_value
+
+    balance = _balance_column(profile)
+    if not balance:
+        return []
+    column = next((c for c in spec.columns if c.name == balance), None)
+    stats = profile.column(balance)
+    if column is None or stats is None or not stats.mean or stats.mean <= 0:
+        return []
+    if _expected_value(column.generator) is None:
+        return []
+
+    entities = int(profile.opening_entities or profile.entities or 0)
+    if entities < 1:
+        return []
+    return [Target(column=balance, total=round(stats.mean * entities, 2), entities=entities)]
+
+
+def _build_metrics(profile: DatasetProfile, spec: DesignSpec) -> list[Metric]:
+    """A starting portfolio report. Proposed, not recovered.
+
+    Which figures matter is a judgement, and no amount of looking at rows
+    reveals it — a tape does not record that its owner cares about weighted
+    average spread rather than weighted average life. Both are computable from
+    the same columns and only one is the point.
+
+    So this proposes the four that hold for any book with a balance: what it is
+    worth, how many assets are in it, what it earns, and how much of it is in
+    trouble. A reader who wants different ones gets a list to edit instead of an
+    empty section to invent, which is the whole difference in practice.
+    """
+    balance = _balance_column(profile)
+    if not balance:
+        return []
+
+    metrics = [
+        Metric(
+            name="total_balance",
+            kind="sum",
+            column=balance,
+            decimals=2,
+            description=f"{balance} summed across the book.",
+        ),
+        Metric(
+            name="active_entities",
+            kind="count",
+            description="Entities reporting at this cut-off.",
+        ),
+    ]
+
+    rate = _rate_column(profile)
+    if rate:
+        metrics.append(
+            Metric(
+                name="wa_rate",
+                kind="weighted_mean",
+                column=rate,
+                weight=balance,
+                decimals=4,
+                description=f"{rate}, weighted by {balance}.",
+            )
+        )
+
+    lifecycle = spec.lifecycle
+    if lifecycle and len(lifecycle.states) > 1:
+        healthy = lifecycle.states[0]
+        metrics.append(
+            Metric(
+                name="non_performing_pct",
+                kind="share_where",
+                column=balance,
+                where=f"{lifecycle.state_column} != {healthy!r}",
+                decimals=6,
+                description=f"Share of {balance} not in {healthy!r}.",
+            )
+        )
+    return metrics
+
+
+def _build_results(spec: DesignSpec) -> Results:
+    """Charts for the metrics just proposed, on the same footing.
+
+    Drawn from the metrics rather than from the panel, so the line on the screen
+    is the number in the report and not a second calculation that might disagree.
+    """
+    names = {m.name for m in spec.metrics}
+    charts: list[ChartSpec] = []
+
+    if "total_balance" in names:
+        charts.append(
+            ChartSpec(
+                kind="series",
+                title="Portfolio balance",
+                metric="total_balance",
+                unit="money",
+                description="What the book is worth at each cut-off.",
+                explain="The sum of every reporting entity's balance. It falls as assets "
+                "amortise, redeem or leave the pool, and steps up if new ones arrive.",
+            )
+        )
+
+    lifecycle = spec.lifecycle
+    if lifecycle and len(lifecycle.states) > 1:
+        live = [s for s in lifecycle.states if s not in lifecycle.terminal]
+        charts.append(
+            ChartSpec(
+                kind="stacked_series",
+                title="State mix",
+                column=lifecycle.state_column,
+                states=live or lifecycle.states,
+                unit="percent",
+                description="Share of entities in each state, cut-off by cut-off.",
+                explain="Every entity sits in exactly one state each period. States an "
+                "entity cannot leave are left out, because they only accumulate and "
+                "would swamp the picture.",
+            )
+        )
+
+    if "non_performing_pct" in names:
+        charts.append(
+            ChartSpec(
+                kind="series",
+                title="Non-performing share",
+                metric="non_performing_pct",
+                unit="percent",
+                description="Balance outside the healthy state, as a share of the book.",
+                explain="Weighted by balance rather than counted by entity, so one large "
+                "asset in trouble registers as more than one small one.",
+            )
+        )
+
+    return Results(charts=charts)
+
+
+def _balance_column(profile: DatasetProfile) -> str | None:
+    """The column a portfolio's size is measured in.
+
+    Named candidates first, because `current_balance` beats a column that merely
+    contains the word; and numeric-only throughout, since a tape read from CSV
+    can carry a `balance_type` column holding text.
+    """
+    named = {c.name.lower(): c for c in profile.columns}
+    for hint in (
+        "current_par",
+        "current_balance",
+        "outstanding_balance",
+        "current_principal_balance",
+        "principal_balance",
+        "balance",
+    ):
+        candidate = named.get(hint)
+        if candidate is not None and candidate.dtype in ("int", "float"):
+            return candidate.name
+    for column in profile.columns:
+        if column.dtype in ("int", "float") and "balance" in column.name.lower():
+            return column.name
+    return None
+
+
+def _rate_column(profile: DatasetProfile) -> str | None:
+    """The column an average coupon would be taken over.
+
+    Same trap as the balance column, and the one that produced a real bug: a
+    tape carries both `interest_rate_type` holding "Fixed" and
+    `current_interest_rate_pct` holding 4.2, and a match on the substring alone
+    picks the wrong one.
+    """
+    for hint in ("current_interest_rate_pct", "coupon_pct", "interest_rate_pct", "rate_pct"):
+        for column in profile.columns:
+            if column.name.lower() == hint and column.dtype in ("int", "float"):
+                return column.name
+    for column in profile.columns:
+        name = column.name.lower()
+        if (
+            column.dtype in ("int", "float")
+            and any(hint in name for hint in ("coupon", "interest_rate", "rate"))
+            and not any(bad in name for bad in ("type", "flag", "code", "index"))
+        ):
+            return column.name
+    return None

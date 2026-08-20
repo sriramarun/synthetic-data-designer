@@ -70,6 +70,14 @@ def _expected_value(gen: Any) -> float | None:
             return loc + scale
         if gen.dist == "gamma":
             return loc + float(params.get("a", 1.0)) * scale
+        if gen.dist == "beta":
+            # a/(a+b) is the mean of the standard beta; loc and scale move it onto
+            # the column's own units. Added because the profiler fits beta to
+            # bounded balances, and without this a learned target on a perfectly
+            # scalable generator was refused for no reason.
+            a = float(params.get("a", 1.0))
+            b = float(params.get("b", 1.0))
+            return loc + scale * a / (a + b) if a + b > 0 else None
         return None
 
     return None
