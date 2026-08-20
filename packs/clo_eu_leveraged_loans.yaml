@@ -584,28 +584,10 @@ derivations:
     dtype: float
     stage: both
 
-  # -- rating ---------------------------------------------------------------
-  # Derived from the credit state plus a per-facility offset, NOT migrated by a
-  # rating transition matrix. Ratings therefore move when credit quality moves
-  # and not otherwise, which is a simplification: real ratings drift within a
-  # performing state and can be downgraded before any distress is visible. It is
-  # a defensible v1 and must not be described as a rating migration model.
-  - target: rating_at_cutoff
-    kind: when
-    stage: both
-    rules:
-      - {if: "credit_state == 'Defaulted'", then: "D"}
-      - {if: "credit_state == 'Recovered'", then: "D"}
-      - {if: "(credit_state == 'Distressed') and (rating_noise < 0.34)", then: "CCC-"}
-      - {if: "(credit_state == 'Distressed') and (rating_noise < 0.67)", then: "CCC"}
-      - {if: "credit_state == 'Distressed'", then: "CCC+"}
-      - {if: "(credit_state == 'Watchlist') and (rating_noise < 0.40)", then: "B-"}
-      - {if: "credit_state == 'Watchlist'", then: "B"}
-      - {if: "rating_noise < 0.18", then: "BB"}
-      - {if: "rating_noise < 0.42", then: "BB-"}
-      - {if: "rating_noise < 0.72", then: "B+"}
-    else: "B"
-
+  # -- rating -------------------------------------------------------------
+  # `rating_at_cutoff` is no longer derived: it is a migrating chain of its own,
+  # declared under `secondary_chains` below. `rating_bucket` still follows from
+  # whatever the chain produced.
   - target: rating_bucket
     kind: when
     stage: both
@@ -898,6 +880,69 @@ lifecycle:
     Prepaid: {current_balance: 0.0}
     Matured: {current_balance: 0.0}
     Recovered: {current_balance: 0.0}
+
+
+# ---------------------------------------------------------------------------
+# secondary chains — the rating, migrating on its own
+# ---------------------------------------------------------------------------
+#
+# A rating is a forward-looking opinion about whether a borrower can pay, not a
+# record of whether it has. It moves while a facility is performing perfectly,
+# and it normally moves *first*: a company is downgraded from B to B- with every
+# instalment paid on time, and that downgrade is the early warning the rating
+# exists to give.
+#
+# Derived from the credit state — which is what this pack did until now — the
+# rating could only ever agree with what was already obvious, and the CCC share
+# came out exactly equal to the distressed share in every scenario. Every CLO
+# indenture caps CCC assets, and a bucket that only fills once facilities are
+# visibly distressed cannot be used to test that cap.
+#
+# The two chains are coupled both ways:
+#
+#   `forced_by`  a defaulted facility *is* rated D. No ambiguity, so the credit
+#                state simply overwrites the rating.
+#   `stress`     a worse rating makes distress more likely. How much is a
+#                modelling choice, not a fact, and these are demo assumptions.
+#
+# Rows are ordered best to worst and each sums to 1. Downgrades outnumber
+# upgrades, which is what a sub-investment-grade book looks like.
+
+secondary_chains:
+  - name: rating
+    lifecycle:
+      state_column: rating_at_cutoff
+      states: [BB, "BB-", "B+", B, "B-", "CCC+", CCC, "CCC-", D]
+      absorbing: [D]
+      initial_distribution:
+        BB: 0.10
+        "BB-": 0.18
+        "B+": 0.26
+        B: 0.28
+        "B-": 0.13
+        "CCC+": 0.03
+        CCC: 0.015
+        "CCC-": 0.005
+      # to:  BB    BB-    B+     B      B-     CCC+   CCC    CCC-   D
+      transitions:
+        - [0.9450, 0.0400, 0.0100, 0.0030, 0.0015, 0.0004, 0.0001, 0.0000, 0.0000]
+        - [0.0250, 0.9200, 0.0400, 0.0100, 0.0035, 0.0010, 0.0004, 0.0001, 0.0000]
+        - [0.0040, 0.0300, 0.9150, 0.0380, 0.0090, 0.0025, 0.0010, 0.0004, 0.0001]
+        - [0.0010, 0.0060, 0.0330, 0.9100, 0.0380, 0.0080, 0.0028, 0.0010, 0.0002]
+        - [0.0004, 0.0016, 0.0080, 0.0400, 0.8950, 0.0380, 0.0120, 0.0040, 0.0010]
+        - [0.0001, 0.0005, 0.0024, 0.0110, 0.0450, 0.8700, 0.0500, 0.0170, 0.0040]
+        - [0.0000, 0.0002, 0.0008, 0.0040, 0.0180, 0.0600, 0.8400, 0.0620, 0.0150]
+        - [0.0000, 0.0000, 0.0002, 0.0012, 0.0060, 0.0250, 0.0700, 0.8576, 0.0400]
+        - [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 1.0000]
+    coupling:
+      forced_by:
+        Defaulted: D
+        Recovered: D
+      stress:
+        "CCC+": 2.0
+        CCC: 3.2
+        "CCC-": 4.5
+        D: 1.0
 
 # ---------------------------------------------------------------------------
 # dynamics
