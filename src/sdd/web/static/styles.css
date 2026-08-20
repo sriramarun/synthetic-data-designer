@@ -29,26 +29,31 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:      #131316;
-    --panel:   #1b1b1f;
-    --panel-2: #202026;
-    --ink:     #ececf0;
-    --ink-2:   #a6a6b0;
-    --ink-3:   #74747e;
-    --line:    #2d2d34;
-    --line-2:  #26262c;
-    --accent:  #6fbfa5;
-    --accent-2:#1d2b28;
-    --good:    #6cc08a;
-    --good-bg: #17281d;
-    --warn:    #d9a441;
-    --warn-bg: #2a2216;
-    --bad:     #e0796c;
-    --bad-bg:  #2c1a18;
-    --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 22px -14px rgba(0, 0, 0, .8);
-  }
+/* Dark is available and no longer automatic.
+ *
+ * Behind `prefers-color-scheme` the page followed the operating system, so the
+ * same build looked like two different products depending on whose machine it
+ * was opened on — and the screenshots in the user guide, captured in light,
+ * matched neither for anyone running a dark desktop. Light is the design; dark
+ * is opt-in by setting `data-theme="dark"` on the root element. */
+:root[data-theme="dark"] {
+  --bg:      #131316;
+  --panel:   #1b1b1f;
+  --panel-2: #202026;
+  --ink:     #ececf0;
+  --ink-2:   #a6a6b0;
+  --ink-3:   #74747e;
+  --line:    #2d2d34;
+  --line-2:  #26262c;
+  --accent:  #6fbfa5;
+  --accent-2:#1d2b28;
+  --good:    #6cc08a;
+  --good-bg: #17281d;
+  --warn:    #d9a441;
+  --warn-bg: #2a2216;
+  --bad:     #e0796c;
+  --bad-bg:  #2c1a18;
+  --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 22px -14px rgba(0, 0, 0, .8);
 }
 
 * { box-sizing: border-box; }
@@ -454,4 +459,126 @@ table.grid-table { border-collapse: separate; border-spacing: 0; width: 100%; fo
   .rail .step { width: auto; }
   .rail .step .s i { display: none; }
   textarea { min-height: 320px; }
+}
+
+/* --------------------------------------------------------------- configure
+   Five collapsible groups instead of six blind tabs. Tabs hide their contents
+   behind a click and give no clue what is inside, so the only way to know
+   whether a setting mattered was to open all six. A group states what it holds
+   and reports what it currently is, so an unopened one is an answered question
+   rather than an unread page. */
+
+.outcome {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.outcome strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.outcome .muted { color: var(--ink-2); }
+
+details.group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+details.group > summary {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "title state" "sub state";
+  align-items: center;
+  gap: 2px 16px;
+  padding: 14px 18px 14px 40px;
+  cursor: pointer;
+  position: relative;
+  list-style: none;
+  user-select: none;
+}
+details.group > summary::-webkit-details-marker { display: none; }
+details.group > summary::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  width: 7px; height: 7px;
+  border-right: 1.5px solid var(--ink-2);
+  border-bottom: 1.5px solid var(--ink-2);
+  transform: translateY(-70%) rotate(-45deg);
+  transition: transform .15s ease;
+}
+details.group[open] > summary::before { transform: translateY(-25%) rotate(45deg); }
+details.group > summary:hover { background: var(--panel-2); }
+details.group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.g-title { grid-area: title; font-weight: 600; font-size: 15px; color: var(--ink); }
+.g-sub   { grid-area: sub;   font-size: 12.5px; color: var(--ink-2); }
+.g-state {
+  grid-area: state;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.g-state.changed { color: var(--accent); }
+
+.g-body { padding: 4px 18px 20px; border-top: 1px solid var(--line); }
+.g-body > .hint:first-child { margin-top: 12px; }
+
+.sub-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: .02em;
+  color: var(--ink);
+  margin: 22px 0 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.g-body > .sub-head:first-child { margin-top: 12px; padding-top: 0; border-top: 0; }
+
+/* ------------------------------------------------------------ featured pack
+   One pack is the one to try first. Marked with its own colour rather than the
+   accent, because the accent already means "this is the action" all over the
+   page and reusing it here would say only that a pack is a button. */
+
+:root {
+  --feature:    #6b4fa8;
+  --feature-bg: #f3effa;
+  --feature-line: #d6c9ef;
+}
+:root[data-theme="dark"] {
+  --feature:    #b49ce8;
+  --feature-bg: #221c30;
+  --feature-line: #3b3054;
+}
+
+.pack.featured {
+  background: var(--feature-bg);
+  border-color: var(--feature-line);
+}
+.pack.featured:hover { border-color: var(--feature); }
+.pack.featured .name { color: var(--feature); }
+
+.pack .name { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.pack .star {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--feature);
+  border: 1px solid var(--feature-line);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
 }

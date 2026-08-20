@@ -124,29 +124,27 @@
     <section class="view" id="view-configure" hidden>
       <div class="head">
         <h1>Configure</h1>
-        <p>Everything here edits one document. The Advanced tab shows that document, and it
-           updates as you go.</p>
+        <p>Two sections are open because they are the ones worth checking. The rest have
+           working defaults — open them only if you want to change something.</p>
       </div>
 
-      <div class="tabs" id="config-tabs" role="tablist">
-        <button class="tab" data-tab="scale"      role="tab" aria-selected="true">Scale</button>
-        <button class="tab" data-tab="method"     role="tab" aria-selected="false">Generation method</button>
-        <button class="tab" data-tab="randomness" role="tab" aria-selected="false">Randomness</button>
-        <button class="tab" data-tab="aging"      role="tab" aria-selected="false">Data aging</button>
-        <button class="tab" data-tab="schema"     role="tab" aria-selected="false">Schema</button>
-        <button class="tab" data-tab="advanced"   role="tab" aria-selected="false">Advanced</button>
-      </div>
+      <!-- What pressing Generate will actually produce. Live. -->
+      <div class="outcome" id="cfg-outcome"></div>
 
-      <!-- scale -->
-      <div class="tabpane" id="tab-scale">
-        <div class="card">
-          <div class="card-head"><h2>How much data</h2></div>
+      <!-- 1 ─ essentials -->
+      <details class="group" id="grp-essentials" open>
+        <summary>
+          <span class="g-title">Size and shape</span>
+          <span class="g-sub">How much data, over how long, and under which scenario</span>
+          <span class="g-state" id="state-essentials"></span>
+        </summary>
+        <div class="g-body">
           <div class="grid three">
             <label class="field">
-              <span class="lbl">Rows to generate</span>
-              <input type="number" id="cfg-records" min="1" step="1000" value="10000" />
-              <span class="sub">Entities in the pool — loans, leases, accounts. Each appears
-                once per period.</span>
+              <span class="lbl" id="cfg-records-label">How many loans</span>
+              <input type="number" id="cfg-records" min="1" step="100" value="10000" />
+              <span class="sub" id="cfg-records-sub">Each one appears once per cut-off, so the
+                row count is this times the number of periods.</span>
             </label>
             <label class="field">
               <span class="lbl">Seed</span>
@@ -160,77 +158,81 @@
                 prepayment and collateral together.</span>
             </label>
           </div>
-          <div class="note" id="cfg-size-note"></div>
+          <div class="grid three" id="cfg-aging-basics" style="margin-top:16px"></div>
         </div>
-      </div>
+      </details>
 
-      <!-- generation method -->
-      <div class="tabpane" id="tab-method" hidden>
-        <div class="card">
-          <div class="card-head"><h2>Generation method</h2></div>
-          <p class="hint">How each column's values are drawn. Whatever you pick is written into
-             the configuration as a set of generators you can read and edit.</p>
-          <div class="method-list" id="cfg-methods"></div>
-          <div id="method-notes"></div>
-        </div>
-      </div>
-
-      <!-- randomness -->
-      <div class="tabpane" id="tab-randomness" hidden>
-        <div class="card">
-          <div class="card-head"><h2>Randomness</h2></div>
-          <p class="hint">Applied after sampling, before anything is derived — so a ratio
-             recomputed from a jittered balance still matches that balance.</p>
-          <div class="grid two" id="cfg-randomness"></div>
-          <div id="randomness-notes"></div>
-        </div>
-      </div>
-
-      <!-- data aging -->
-      <div class="tabpane" id="tab-aging" hidden>
-        <div class="card">
-          <div class="card-head"><h2>Data aging</h2></div>
-          <p class="hint">Walk the pool forward, period by period: loans pay down, some fall
-             behind, some redeem early, some write off.</p>
-          <div class="grid three" id="cfg-aging-basics"></div>
-          <div class="grid three" id="cfg-aging-rates" style="margin-top:16px"></div>
+      <!-- 2 ─ behaviour -->
+      <details class="group" id="grp-behaviour" open>
+        <summary>
+          <span class="g-title">How loans behave</span>
+          <span class="g-sub">Defaults, early repayment, recovery, and whether the pool keeps
+            lending</span>
+          <span class="g-state" id="state-behaviour"></span>
+        </summary>
+        <div class="g-body">
+          <div class="grid three" id="cfg-aging-rates"></div>
           <div id="aging-notes"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><h2>New loans</h2></div>
+          <div class="sub-head">New business</div>
           <p class="hint">A closed pool holds every loan at the first cut-off and only shrinks.
              An open one keeps lending: loans written during the window appear at the cut-off
              they were written on, and are aged from there.</p>
           <div class="grid two" id="cfg-originations"></div>
         </div>
-        <div class="card" id="card-lifecycle">
-          <div class="card-head"><h2>Transition matrix</h2></div>
-          <p class="hint">Each row is a state, each column where a loan might be next period.
-             Rows must sum to 1 — the total is live, and turns red if it does not.</p>
-          <div class="matrix" id="cfg-matrix"></div>
-        </div>
-      </div>
+      </details>
 
-      <!-- schema -->
-      <div class="tabpane" id="tab-schema" hidden>
-        <div class="card">
-          <div class="card-head">
-            <h2>Columns</h2>
-            <span class="spacer"></span>
-            <input type="search" id="cfg-filter" class="search" placeholder="Filter columns…" />
-          </div>
-          <p class="hint">The distribution behind each column. Edit a weight or a bound and it is
-             validated immediately.</p>
+      <!-- 3 ─ realism -->
+      <details class="group" id="grp-realism">
+        <summary>
+          <span class="g-title">Realism</span>
+          <span class="g-sub">How each value is drawn, and how much noise to add</span>
+          <span class="g-state" id="state-realism"></span>
+        </summary>
+        <div class="g-body">
+          <div class="sub-head">How values are drawn</div>
+          <p class="hint">Whatever you pick is written into the configuration as a set of
+             generators you can read and edit.</p>
+          <div class="method-list" id="cfg-methods"></div>
+          <div id="method-notes"></div>
+
+          <div class="sub-head">Imperfection</div>
+          <p class="hint">Applied after sampling, before anything is derived — so a ratio
+             recomputed from a jittered balance still matches that balance.</p>
+          <div class="grid two" id="cfg-randomness"></div>
+          <div id="randomness-notes"></div>
+        </div>
+      </details>
+
+      <!-- 4 ─ columns -->
+      <details class="group" id="grp-columns">
+        <summary>
+          <span class="g-title">Columns</span>
+          <span class="g-sub">The distribution behind each one</span>
+          <span class="g-state" id="state-columns"></span>
+        </summary>
+        <div class="g-body">
+          <input type="search" id="cfg-filter" class="search" placeholder="Filter columns…" />
           <div id="cfg-columns"></div>
         </div>
-      </div>
+      </details>
 
-      <!-- advanced -->
-      <div class="tabpane" id="tab-advanced" hidden>
-        <div class="card">
-          <div class="card-head">
-            <h2>Configuration (YAML)</h2>
+      <!-- 5 ─ the document -->
+      <details class="group" id="grp-document">
+        <summary>
+          <span class="g-title">The configuration itself</span>
+          <span class="g-sub">The transition matrix, and the YAML that actually runs</span>
+          <span class="g-state" id="state-document"></span>
+        </summary>
+        <div class="g-body">
+          <div id="card-lifecycle">
+            <div class="sub-head">Transition matrix</div>
+            <p class="hint">Each row is a state, each column where a loan might be next period.
+               Rows must sum to 1 — the total is live, and turns red if it does not.</p>
+            <div class="matrix" id="cfg-matrix"></div>
+          </div>
+
+          <div class="sub-head">
+            YAML
             <span class="spacer"></span>
             <button class="btn ghost sm" id="btn-yaml-apply">Apply</button>
             <button class="btn ghost sm" id="btn-yaml-revert">Revert</button>
@@ -240,7 +242,7 @@
           <textarea id="cfg-yaml" spellcheck="false"></textarea>
           <div id="yaml-status"></div>
         </div>
-      </div>
+      </details>
 
       <div id="config-problems"></div>
     </section>

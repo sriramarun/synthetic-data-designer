@@ -64,6 +64,17 @@ class Meta(_Base):
         default=None,
         description="Where this spec came from — a pack name, or the sample file it was profiled from.",
     )
+    display_order: int | None = Field(
+        default=None,
+        description="Where this pack sits in the picker. Lower comes first; packs without one "
+        "follow, alphabetically. Alphabetical order is an accident of naming, and the first "
+        "thing in a list is what most people click.",
+    )
+    featured: bool = Field(
+        default=False,
+        description="Mark this pack as the one to try first. At most one should carry it — "
+        "highlighting everything highlights nothing.",
+    )
 
 
 class Calendar(_Base):
