@@ -45,7 +45,7 @@ def _numeric(frame: pd.DataFrame, column: str, metric: Metric) -> pd.Series:
     return pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
 
 
-def _one(frame: pd.DataFrame, metric: Metric, period: int, running: dict[str, float]) -> float:
+def _one(frame: pd.DataFrame, metric: Metric, period: int, running: dict[str, Any]) -> float:
     mask = _selected(frame, metric, period)
     kind = metric.kind
 
@@ -100,7 +100,110 @@ def _one(frame: pd.DataFrame, metric: Metric, period: int, running: dict[str, fl
         total = float(by_group.sum())
         return float(by_group.max() / total) if total > 0 else float("nan")
 
+    if kind == "effective_count":
+        return _effective_count(frame, metric, mask, values)
+
+    if kind == "turnover":
+        return _turnover(frame, metric, mask, values, running)
+
     raise MetricError(f"metric {metric.name!r} has unknown kind {kind!r}")
+
+
+def _effective_count(
+    frame: pd.DataFrame, metric: Metric, mask: pd.Series | None, values: pd.Series
+) -> float:
+    """How many groups the book *behaves* as, given how concentrated it is.
+
+    A portfolio of a hundred obligors where two of them carry half the money is
+    not a hundred-name portfolio, and a plain count says it is. This is the
+    inverse Herfindahl — one over the sum of squared shares — which answers the
+    same question a rating agency's diversity score answers, from a formula that
+    is ordinary statistics rather than anyone's model.
+
+    It reads as a count, which is the point. A hundred equal obligors return
+    100.0; move half the money into two of them and it falls toward 8. The
+    number is directly comparable to the headline obligor count, and the gap
+    between the two *is* the concentration.
+    """
+    if metric.group not in frame.columns:
+        raise MetricError(
+            f"metric {metric.name!r} groups by {metric.group!r}, which is not in the panel"
+        )
+    rows = frame if mask is None else frame[mask]
+    if rows.empty:
+        return float("nan")
+
+    weights = values if mask is None else values[mask]
+    by_group = weights.groupby(rows[metric.group]).sum()
+    total = float(by_group.sum())
+    if total <= 0:
+        return float("nan")
+
+    shares = by_group / total
+    herfindahl = float((shares**2).sum())
+    return float(1.0 / herfindahl) if herfindahl > 0 else float("nan")
+
+
+def _turnover(
+    frame: pd.DataFrame,
+    metric: Metric,
+    mask: pd.Series | None,
+    values: pd.Series,
+    running: dict[str, Any],
+) -> float:
+    """How much of the book left since the last cut-off, as a share of it.
+
+    A managed pool trades: facilities are sold, prepay or mature, and the
+    proceeds buy replacements. Total balance can sit almost flat through all of
+    it, so the size of the book says nothing about how much of it changed hands.
+
+    Measured on the entities themselves rather than on the balance total, since
+    that is the only way to tell a facility that left from one that amortised.
+    Departures only: arrivals are already visible as the movement in total
+    balance, and counting both would report a pool that replaced every asset as
+    200% turned over.
+
+    **Valued at the last balance the entity carried while still outstanding**,
+    which is the part that had to be measured rather than assumed. Most packs
+    zero the balance as an entity enters its terminal state — that is what
+    `state_fields` is for — so the row on which a loan disappears reads zero, and
+    a first version of this metric duly reported zero turnover on a book that
+    lost a quarter of its loans. It read non-zero on the CLO only because that
+    pack happens not to zero `current_par` on exit, which is an accident of one
+    pack and not a property of the measure.
+
+    The first cut-off has nothing to compare against and reports nothing rather
+    than zero — a book cannot have turned over before it existed, and a zero in
+    that slot would drag every average down.
+    """
+    key = f"_turnover::{metric.name}"
+    id_column = metric.entity_column or metric.group
+    if not id_column or id_column not in frame.columns:
+        raise MetricError(
+            f"metric {metric.name!r} needs an `entity_column` naming the identifier that "
+            "persists between cut-offs; without it there is no way to tell which entities left"
+        )
+
+    rows = frame if mask is None else frame[mask]
+    weights = values if mask is None else values[mask]
+    current = weights.groupby(rows[id_column]).sum()
+
+    held: pd.Series | None = running.get(key)
+    if held is None:
+        running[key] = current[current > 0]
+        return float("nan")
+
+    departed = held.index.difference(current.index)
+    opening = float(held.sum())
+    turnover = float(held.reindex(departed).sum() / opening) if opening > 0 else float("nan")
+
+    # Carry the last positive balance forward for everything still here, and
+    # forget what has gone. An entity that has amortised to zero but is still
+    # reporting keeps its last real balance, which is stale by a period or two
+    # and only ever affects the denominator.
+    surviving = held.reindex(current.index)
+    running[key] = current.where(current > 0, surviving).dropna()
+    return turnover
 
 
 def compute(
@@ -108,12 +211,14 @@ def compute(
     frame: pd.DataFrame,
     period: int,
     date: str,
-    running: dict[str, float],
+    running: dict[str, Any],
 ) -> dict[str, Any]:
     """Every metric for one cut-off.
 
-    ``running`` carries the cumulative totals between periods, which is the only
-    state a metric can hold.
+    ``running`` carries what a metric needs to remember between periods: a
+    cumulative total, or the previous cut-off's per-entity balances for
+    turnover. Keys are namespaced by metric name, so two metrics of the same
+    kind cannot tread on each other.
     """
     row: dict[str, Any] = {"period": period, "date": date}
     for metric in spec.metrics:

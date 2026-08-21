@@ -654,3 +654,119 @@ emit:
 validation:
   non_negative_columns: [current_balance, arrears_amount, original_balance,
                          scheduled_monthly_payment, days_past_due]
+
+# ---------------------------------------------------------------------------
+# metrics — the monthly portfolio report
+# ---------------------------------------------------------------------------
+#
+# The same machinery as the CLO and auto packs, on a mortgage book's own columns.
+# Three packs, three asset classes, one metric vocabulary — which is the claim
+# the report has to earn.
+
+metrics:
+  - name: total_balance
+    kind: sum
+    column: current_balance
+    decimals: 2
+    description: Principal outstanding across the book.
+
+  - name: active_loans
+    kind: count
+    description: Loans reporting at this cut-off.
+
+  - name: wa_interest_rate
+    kind: weighted_mean
+    column: current_interest_rate_pct
+    weight: current_balance
+    decimals: 4
+    description: Balance-weighted mortgage rate.
+
+  - name: wa_seasoning_months
+    kind: weighted_mean
+    column: seasoning_months
+    weight: current_balance
+    decimals: 2
+    description: Balance-weighted months since origination.
+
+  - name: arrears_pct
+    kind: share_where
+    column: current_balance
+    where: "arrears_bucket != 'Performing'"
+    decimals: 6
+    description: Share of balance behind on payments.
+
+  - name: max_province_share
+    kind: max_group_share
+    column: current_balance
+    group: province
+    decimals: 6
+    description: Largest single province's share of the book.
+
+  - name: effective_provinces
+    kind: effective_count
+    column: current_balance
+    group: province
+    decimals: 2
+    description: >-
+      How many provinces the book behaves as, given how the balance is spread.
+      A mortgage pool's geography is its correlation.
+
+  - name: portfolio_turnover
+    kind: turnover
+    column: current_balance
+    entity_column: loan_id
+    decimals: 6
+    description: >-
+      Balance that left the pool since the last cut-off, as a share of the
+      balance that was there. Mostly refinancing and moving house.
+
+
+# ---------------------------------------------------------------------------
+# results — what to draw
+# ---------------------------------------------------------------------------
+
+results:
+  charts:
+    - kind: series
+      title: Portfolio balance
+      metric: total_balance
+      unit: money
+      description: Principal outstanding at each cut-off.
+      explain: >-
+        The total still owed across every mortgage in the pool. Dutch mortgages
+        often pay interest only, so this can sit far flatter than an amortising
+        book — what pulls it down is borrowers refinancing away or selling up.
+
+    - kind: stacked_series
+      title: Arrears status
+      column: arrears_bucket
+      states: [Performing, 1-29 DPD, 30-59 DPD, 60-89 DPD, 90+ DPD, Defaulted]
+      unit: percent
+      description: Share of loans in each arrears bucket. Loans that have left the pool
+        are excluded.
+      explain: >-
+        DPD means "days past due", one bucket per missed month. Dutch arrears are
+        historically very low, so a healthy pool shows almost nothing beyond the
+        first band — which makes any thickening of the later bands meaningful
+        rather than noise.
+
+    - kind: series
+      title: Effective provinces
+      metric: effective_provinces
+      unit: count
+      description: Geographic diversity, adjusted for concentration.
+      explain: >-
+        Counting provinces treats a book as spread out even if most of the lending
+        is in one. This is the count adjusted for that — one divided by the sum of
+        each province's squared share of the balance. House prices and job losses
+        move regionally, so a book concentrated in one province is far more
+        correlated than its loan count suggests.
+
+    - kind: category_bar
+      title: Balance by province
+      group: province
+      column: current_balance
+      unit: money
+      description: Where the collateral is.
+      explain: >-
+        The raw geographic split behind the effective-province count above.

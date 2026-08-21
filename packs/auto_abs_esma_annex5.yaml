@@ -680,3 +680,134 @@ validation:
     - balloon_amount
     - days_past_due
     - primary_income
+
+# ---------------------------------------------------------------------------
+# metrics — the monthly portfolio report
+# ---------------------------------------------------------------------------
+#
+# Here to prove the report is not a CLO feature wearing generic clothes. Every
+# figure below is the same metric machinery the CLO pack uses, pointed at an
+# auto book's own columns — including the two kinds added for the CLO's P1 tail,
+# which is the real test: if `effective_count` and `turnover` only made sense
+# for corporate loans, the abstraction would be wrong.
+#
+# Averages are weighted by balance. Unweighted, a EUR 45k car loan and a EUR 4k
+# one would count alike.
+
+metrics:
+  - name: total_balance
+    kind: sum
+    column: current_principal_balance
+    decimals: 2
+    description: Principal outstanding across the book.
+
+  - name: active_loans
+    kind: count
+    description: Loans reporting at this cut-off.
+
+  - name: wa_interest_rate
+    kind: weighted_mean
+    column: current_interest_rate_pct
+    weight: current_principal_balance
+    decimals: 4
+    description: Balance-weighted interest rate.
+
+  - name: wa_seasoning_months
+    kind: weighted_mean
+    column: seasoning_months
+    weight: current_principal_balance
+    decimals: 2
+    description: Balance-weighted months since origination.
+
+  - name: arrears_pct
+    kind: share_where
+    column: current_principal_balance
+    where: "account_status != 'Performing'"
+    decimals: 6
+    description: Share of balance behind on payments.
+
+  - name: total_arrears
+    kind: sum
+    column: arrears_amount
+    decimals: 2
+    description: Cash actually overdue, as distinct from the balance behind it.
+
+  - name: max_region_share
+    kind: max_group_share
+    column: current_principal_balance
+    group: geographic_region
+    decimals: 6
+    description: Largest single region's share of the book.
+
+  # The two kinds added for the CLO. A car loan pool is diversified across
+  # manufacturers rather than obligors, and the same arithmetic answers it.
+  - name: effective_manufacturers
+    kind: effective_count
+    column: current_principal_balance
+    group: vehicle_manufacturer
+    decimals: 2
+    description: >-
+      How many manufacturers the collateral behaves as, given how the balance
+      is spread. Falls below the plain count as one marque dominates.
+
+  - name: portfolio_turnover
+    kind: turnover
+    column: current_principal_balance
+    entity_column: unique_identifier
+    decimals: 6
+    description: >-
+      Balance that left the pool since the last cut-off — redeemed early, run
+      to term, or charged off — as a share of the balance that was there.
+
+
+# ---------------------------------------------------------------------------
+# results — what to draw
+# ---------------------------------------------------------------------------
+
+results:
+  charts:
+    - kind: series
+      title: Portfolio balance
+      metric: total_balance
+      unit: money
+      description: Principal outstanding at each cut-off.
+      explain: >-
+        The total still owed across every car loan in the pool. Unlike a corporate
+        loan, a car loan repays principal every month, so this falls steadily even
+        when nothing goes wrong — and falls faster when borrowers settle early.
+
+    - kind: stacked_series
+      title: Arrears status
+      column: account_status
+      states: [Performing, 1-30 DPD, 31-60 DPD, 61-90 DPD, Defaulted]
+      unit: percent
+      description: Share of loans in each arrears bucket. Loans that have left the pool
+        are excluded.
+      explain: >-
+        DPD means "days past due". A loan moves one bucket further out for each
+        month it misses, so 61-90 DPD means roughly three missed payments. Most
+        pools show a thin, stable tail here; a widening one is the early sign of a
+        deteriorating book.
+
+    - kind: series
+      title: Effective manufacturers
+      metric: effective_manufacturers
+      unit: count
+      description: Manufacturer diversity, adjusted for concentration.
+      explain: >-
+        Counting marques treats a pool as diversified even if most of the money is
+        in one. This is the count adjusted for that — one divided by the sum of each
+        manufacturer's squared share of the balance. It matters because used-car
+        values move by marque: a pool concentrated in one manufacturer is exposed
+        to that manufacturer's residual values, however many loans it holds.
+
+    - kind: category_bar
+      title: Balance by region
+      group: geographic_region
+      column: current_principal_balance
+      unit: money
+      description: Where the collateral is.
+      explain: >-
+        Regional concentration matters for the same reason manufacturer
+        concentration does: local economies fail together, so a pool weighted
+        heavily to one region carries a risk the loan-by-loan figures do not show.

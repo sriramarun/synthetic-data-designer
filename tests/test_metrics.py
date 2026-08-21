@@ -115,7 +115,10 @@ def test_a_missing_column_is_named_in_the_error():
 
 def test_the_pack_reports_every_figure_the_specification_lists(run):
     _, _, report = run
-    assert len(api.load(PACK).metrics) == 19
+    # 19 P0 plus the three §17 marks P1, added once the licensing question was
+    # answered by computing them generically rather than reproducing an agency's
+    # tables. See `docs/clo/GENERIC-CREDIT-MEASURES.md`.
+    assert len(api.load(PACK).metrics) == 22
     for column in (
         "collateral_par",
         "active_facilities",
@@ -233,6 +236,19 @@ def test_metrics_work_on_a_pack_that_is_not_the_clo_one(tmp_path):
 
 
 def test_a_pack_without_metrics_writes_none(tmp_path):
-    assert api.load("auto_abs_esma_annex5").metrics == []
-    api.run("auto_abs_esma_annex5", 150, tmp_path, seed=3, validate_output=False)
+    """A spec that asks for no report gets no report file.
+
+    This used to point at the auto pack, which declared none. All three shipped
+    packs now carry a report — the genericity claim is worth little if only the
+    pack the feature was built for exercises it — so the case is made explicitly
+    instead.
+    """
+    spec = api.load("auto_abs_esma_annex5").model_dump(
+        mode="json", exclude_none=True, by_alias=True
+    )
+    spec["metrics"] = []
+    spec.pop("results", None)
+
+    api.run(spec, 150, tmp_path, seed=3, validate_output=False)
     assert not (tmp_path / "portfolio_metrics.parquet").exists()
+    assert not (tmp_path / "portfolio_metrics.csv").exists()

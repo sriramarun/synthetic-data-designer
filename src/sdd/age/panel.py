@@ -178,6 +178,7 @@ def run_ageing(
 
     performing_state = lc.states[0]
     hazard_mult, index_shift, recovery_mult = _scenario_knobs(spec, scenario)
+    segment_stress = scenario.segment_stress if scenario else None
 
     current = book.copy().reset_index(drop=True)
     dwell = engine.initial_dwell(len(current), engine.to_idx(current[lc.state_column].to_numpy()))
@@ -227,6 +228,7 @@ def run_ageing(
                 index_shift=index_shift,
                 recovery_mult=recovery_mult,
                 performing_state=performing_state,
+                segment_stress=segment_stress,
             )
             if spec.originations is not None:
                 current, dwell, accrual_counters, joined = originate(
@@ -340,6 +342,37 @@ def run_ageing(
 # ---------------------------------------------------------------------------
 
 
+def _segment_multipliers(
+    df: pd.DataFrame, segment_stress: dict[str, dict[str, float]] | None
+) -> np.ndarray | None:
+    """Per-entity multipliers from a scenario's segment overlay.
+
+    `default_multiplier` moves the whole book at once, which is not how a
+    downturn arrives: 2008 was not every sector worsening by the same factor. A
+    recession lands on the sectors exposed to it, and a portfolio's real risk is
+    how much of it sits in those sectors — which a uniform multiplier cannot
+    express, because the concentration figures come out identical no matter how
+    severe it is set.
+
+    Segments compose by multiplication. A facility that is both in a stressed
+    industry and in a stressed country carries both, which is the intended
+    reading: those are two independent reasons to worry about it.
+    """
+    if not segment_stress:
+        return None
+
+    out: np.ndarray | None = None
+    for column, table in segment_stress.items():
+        if column not in df.columns or not table:
+            continue
+        # Segments not named in the table are left alone rather than zeroed —
+        # a scenario says which parts of the book it lands on, not which parts
+        # it spares.
+        mapped = df[column].map(table).astype(float).fillna(1.0).to_numpy()
+        out = mapped if out is None else out * mapped
+    return out
+
+
 def _step(
     spec: DesignSpec,
     engine: LifecycleEngine,
@@ -355,6 +388,7 @@ def _step(
     recovery_mult: float,
     performing_state: str,
     chains: list[_Chain] | None = None,
+    segment_stress: dict[str, dict[str, float]] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray]]:
     lc = spec.lifecycle
     assert lc is not None
@@ -372,6 +406,17 @@ def _step(
         contribution = chain.stress_multipliers(len(df))
         if contribution is None:
             continue
+        row_multipliers = (
+            contribution if row_multipliers is None else row_multipliers * contribution
+        )
+
+    # A scenario's segment overlay rides the same per-entity channel as the
+    # rating coupling, deliberately. Both say the same kind of thing — *these*
+    # entities are more likely to slip than the book as a whole — and giving
+    # them one mechanism means a rating-driven stress and a sector-driven one
+    # compose by multiplication instead of one silently overwriting the other.
+    contribution = _segment_multipliers(df, segment_stress)
+    if contribution is not None:
         row_multipliers = (
             contribution if row_multipliers is None else row_multipliers * contribution
         )

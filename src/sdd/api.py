@@ -493,6 +493,50 @@ def _rename_column(spec: Any, old: str, new: str) -> None:
     if old in spec.constants:
         spec.constants[new] = spec.constants.pop(old)
 
+    # Everything below was missing, and the omissions were invisible for the
+    # same reason: the only pack exercising the rename declared no metrics, no
+    # charts, no groups and no chain, so nothing referenced a column from any of
+    # them. Renaming `current_balance` left the report pointing at a column that
+    # no longer existed, and the run died mid-generation rather than at the
+    # rename that caused it.
+    for metric in spec.metrics:
+        for attribute in ("column", "weight", "group", "entity_column"):
+            if getattr(metric, attribute, None) == old:
+                setattr(metric, attribute, new)
+        metric.where = swap(metric.where)
+
+    for chart in spec.results.charts:
+        if chart.column == old:
+            chart.column = new
+        if chart.group == old:
+            chart.group = new
+
+    for group in spec.groups:
+        if group.key == old:
+            group.key = new
+        for column in group.columns:
+            if column.name == old:
+                column.name = new
+            gen = column.generator
+            if getattr(gen, "kind", None) == "conditional_categorical" and gen.parent == old:
+                gen.parent = new
+
+    for chain in spec.secondary_chains:
+        if chain.lifecycle.state_column == old:
+            chain.lifecycle.state_column = new
+
+    for scenario in spec.scenarios.values():
+        if old in scenario.segment_stress:
+            scenario.segment_stress[new] = scenario.segment_stress.pop(old)
+
+    # Invariants are SQL against the panel, so a rename that does not reach them
+    # leaves every custom check querying a column that is gone. Rewritten with
+    # the same word-boundary swap the expressions get — the risk is a match
+    # inside a string literal, which is the risk already accepted everywhere
+    # else a spec holds text.
+    for check in spec.validation.custom:
+        check.sql = swap(check.sql) or check.sql
+
 
 # ---------------------------------------------------------------------------
 # configuration — step 3 of the wizard
