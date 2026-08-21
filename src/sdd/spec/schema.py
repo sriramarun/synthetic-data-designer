@@ -1355,6 +1355,83 @@ class PlausibilityBand(_Base):
         return self
 
 
+class BenchmarkObservable(_Base):
+    """One noisy reading of the hidden driver, and how it was produced."""
+
+    column: str = Field(description="The observable column a model may use.")
+    centres: str = Field(
+        description="Derivation whose `when` rules give this observable's mean per latent "
+        "value, in the latent's declared order."
+    )
+    noise: str = Field(
+        description="Helper column holding this observable's measurement error. Its "
+        "generator's `stddev` is the width the inversion uses."
+    )
+
+
+class Benchmark(_Base):
+    """How to compute the best score any model could achieve on this data.
+
+    Every other section describes what to generate. This one describes how the
+    data was generated *well enough to invert* — which is the difference between
+    a synthetic dataset and a measuring instrument.
+
+    The argument in one line: a model scoring 0.84 on real data tells you
+    nothing, because you never learn whether 0.86 or 0.99 was available. Here
+    both are computable, so 0.84 becomes "captured 97% of the obtainable
+    signal" — a statement about the model rather than about the dataset.
+
+    Two numbers come out, and they answer different questions:
+
+    ``oracle``
+        What a model that could *see* the hidden driver would score. Nothing can
+        beat it. Useful as a sanity bound and as a measure of how much the
+        observables leave on the table.
+    ``ceiling``
+        The best score obtainable from the observables alone — the honest
+        target, got by inverting the emission model below with Bayes' rule.
+
+    Requires the emission model to be *stated*: each observable is its latent
+    group's centre plus independent noise of known width. That is a real
+    restriction and it is what buys the exact answer. A generator whose
+    structure cannot be written down cannot be inverted, and a ceiling that was
+    estimated rather than derived would be one more number to argue about.
+    """
+
+    latent: str = Field(
+        description="The hidden column driving the outcome. Must be role `helper`, so it "
+        "never reaches the output a model is scored on."
+    )
+    observables: list[BenchmarkObservable] = Field(
+        default_factory=list,
+        description="The noisy readings a model is allowed to use. Their measurement errors "
+        "must be independent of one another — that independence is what makes combining "
+        "them worth more than reading the best one alone.",
+    )
+    label_states: list[str] = Field(
+        default_factory=list,
+        description="Lifecycle states that count as the bad outcome. An entity reaching any "
+        "of them at any cut-off is labelled 1.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> Benchmark:
+        if not self.observables:
+            raise ValueError(
+                f"benchmark on {self.latent!r} declares no observables, so there is nothing "
+                "for a model to learn from and no ceiling to compute"
+            )
+        if not self.label_states:
+            raise ValueError(
+                f"benchmark on {self.latent!r} names no `label_states`, so there is no "
+                "outcome to score against"
+            )
+        seen = [o.column for o in self.observables]
+        if len(set(seen)) != len(seen):
+            raise ValueError("benchmark lists the same observable twice")
+        return self
+
+
 class Validation(_Base):
     checks: InvariantToggles = Field(default_factory=InvariantToggles)
     custom: list[CustomInvariant] = Field(default_factory=list)
@@ -1632,6 +1709,11 @@ class DesignSpec(_Base):
     )
     emit: Emit = Field(default_factory=Emit)
     validation: Validation = Field(default_factory=Validation)
+    benchmark: Benchmark | None = Field(
+        default=None,
+        description="How to compute the best achievable score on this data. Present only on "
+        "packs built as measuring instruments; see `sdd.benchmark`.",
+    )
 
     # -- convenience lookups ------------------------------------------------
 
