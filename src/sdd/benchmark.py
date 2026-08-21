@@ -143,8 +143,15 @@ def _plain_index(index: pd.Index, name: str) -> pd.Index:
     the same file, so the same code passed locally and failed on three Python
     versions. Normalised at the boundary so callers never meet it, since the
     obvious thing to do with these frames is hand them to scikit-learn.
+
+    ``dtype=object`` is load-bearing and was missed on the first attempt.
+    Pandas 3 infers a string dtype for an object array of strings, so
+    ``pd.Index(values.to_numpy(dtype=object))`` returns straight back to the
+    Arrow-backed dtype this exists to escape — the conversion looks right,
+    changes nothing, and the failure is identical. Stating the dtype is what
+    makes it stick.
     """
-    return pd.Index(index.to_numpy(dtype=object), name=name)
+    return pd.Index(index.to_numpy(dtype=object), dtype=object, name=name)
 
 
 def ceiling(
