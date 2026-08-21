@@ -23,7 +23,7 @@ real run of the European CLO pack:
 | [Step 3 — Configure](screenshots/03-configure.png) | five groups, two open, and what the run will produce |
 | [Step 3 — expanded](screenshots/04-configure-expanded.png) | every group open, showing what each holds |
 | [Step 4 — Generate](screenshots/05-generate.png) | the seven stages, mid-run |
-| [Step 5 — Results](screenshots/06-results.png) | summary, validation, and the pack's own four charts |
+| [Step 5 — Results](screenshots/06-results.png) | summary, validation, and the pack's own six charts |
 | [Step 6 — Download](screenshots/07-download.png) | five formats and the per-period files |
 
 **Contents**
@@ -38,6 +38,7 @@ real run of the European CLO pack:
 - [Step 4 — Generate](#step-4--generate)
 - [Step 5 — Results](#step-5--results)
 - [Step 6 — Download](#step-6--download)
+- [If you have never met a CLO](#if-you-have-never-met-a-clo)
 - [Everything only the YAML exposes](#everything-only-the-yaml-exposes)
 - [The command line](#the-command-line)
 - [Troubleshooting](#troubleshooting)
@@ -117,7 +118,7 @@ learned. A single snapshot still gives you every column's shape.
 
 | Pack | What it is |
 |---|---|
-| **European CLO — Leveraged Loans** (`clo_eu_leveraged_loans`) — *offered first* | 56 columns. Loans to *companies*, several per borrower. Bullet repayment, an open pool that keeps buying for two years, a watchlist-to-distress ladder, a nine-month workout after default, and credit ratings that drift on their own. Comes with a 19-figure monthly report and its own four charts |
+| **European CLO — Leveraged Loans** (`clo_eu_leveraged_loans`) — *offered first* | 58 columns. Loans to *companies*, several per borrower. Bullet repayment, an open pool that keeps buying for two years, a watchlist-to-distress ladder, a nine-month workout after default, and credit ratings that drift on their own. Comes with a 22-figure monthly report and its own six charts |
 | **Dutch Green Loans — Residential Mortgages** (`rmbs_nl_green_lion`) | 71 columns, ESMA Annex 2. Annuity mortgages, house-price index, 8-state delinquency ladder |
 | **European Auto Loans — ESMA Annex 5** (`auto_abs_esma_annex5`) | 44 columns. Depreciating collateral, balloon payments on PCP contracts, fast write-off with recovery |
 
@@ -352,6 +353,160 @@ Below, **Per-period files**: the consolidated panel plus one file per cut-off,
 exactly as the ageing engine wrote them.
 
 **Start over** returns to Upload with a clean slate.
+
+---
+
+## If you have never met a CLO
+
+The CLO pack is offered first and uses vocabulary the other two do not. None of
+it is hard; all of it is unexplained if you have not worked in credit. This
+section is the five minutes that makes the rest of the pack readable.
+
+### What a CLO is
+
+A **CLO** — collateralised loan obligation — is a fund that borrows money,
+buys a few hundred loans made to *companies*, and pays its investors out of what
+those loans repay. It is a mortgage fund with companies instead of households.
+
+Two halves, and this tool only builds one:
+
+| the **collateral** | the **liabilities** |
+|---|---|
+| the several hundred loans the fund owns | the notes the fund issued to raise the money |
+| what this pack generates | **not modelled** |
+
+Everything below is about the collateral. There are no tranches, no waterfall,
+no OC or IC tests and no equity returns anywhere in this product — see
+[what it deliberately leaves out](#what-the-pack-deliberately-leaves-out).
+
+### Facility and obligor — the distinction everything rests on
+
+A **facility** is one loan. An **obligor** is the company that borrowed it.
+
+One company usually borrows several times, so a 500-facility portfolio might
+have only 200 obligors behind it. That matters because **every limit an investor
+cares about is measured per obligor, not per loan.** A fund holding six loans to
+the same struggling retailer is not diversified, however many loans it counts.
+
+This is why the pack declares a **group**: `obligor_id` is generated once with
+its own industry, country and revenue, and every facility belonging to it
+inherits those. Without that, the same company would come out in four industries
+at once and every concentration figure would be meaningless.
+
+The panel has one row per **facility** per month. The obligor's details repeat
+across its facilities, which is what you should expect to see.
+
+### The vocabulary you will meet in the columns
+
+| Term | In plain words |
+|---|---|
+| **Par** | The face value of a loan — what the borrower owes. Not what the loan would fetch if sold |
+| **Market price** | What the loan *would* fetch, quoted per 100 of par. 98.5 means a small discount; 70 means the market is worried |
+| **Bullet** | The loan pays interest monthly and repays the whole principal in one lump at the end. Unlike a mortgage, the balance sits flat for years and then drops to zero |
+| **Spread** | The margin over a floating base rate. A riskier borrower pays a wider spread |
+| **Senior secured** | First in line if the company fails. There is no house or car behind these loans — the claim is on the business itself |
+| **Second lien** | Behind the senior lenders. Higher yield, worse outcome in a default |
+
+### The credit ladder
+
+A company loan does not fall behind in 30-day steps the way a mortgage does. It
+moves through a judgement ladder instead:
+
+```
+Performing → Watchlist → Distressed → Defaulted → Recovered
+                                          │
+                                          └──→ (stays in the pool through workout)
+```
+
+- **Watchlist** — the manager has noticed something. Still paying.
+- **Distressed** — the business is in real trouble. Still, usually, paying.
+- **Defaulted** — it has stopped paying or restructured.
+- **Recovered** — the **workout** finished. A default is not an instant loss:
+  lawyers and administrators spend months recovering what they can, and the
+  pack models that as nine months followed by roughly 62% of par coming back.
+  The rest is the **realised loss**.
+
+A facility can also leave the pool without failing: **Prepaid** (repaid early,
+usually refinanced elsewhere), **Sold** (the manager traded it), or **Matured**
+(it reached the end of its term). Those four exits are terminal — once a
+facility takes one it stops being reported.
+
+### The reinvestment period
+
+Unlike a mortgage pool, a CLO **trades**. For the first two years — the
+**reinvestment period** — every loan that repays is replaced with a new one, so
+the portfolio stays roughly the same size while its contents change completely.
+After that the fund stops buying and the portfolio simply runs down.
+
+You can see both phases in the *Portfolio par* chart: flat for 24 months, then
+falling away. The `portfolio_turnover` metric measures the churn underneath that
+flat line — how much actually changed hands each month.
+
+### Credit ratings, and what CCC means
+
+Every loan carries a letter grade saying how likely the borrower is to keep
+paying. In this pack they run **BB** (best here) → **B** → **CCC** → **D** (the
+borrower has already defaulted).
+
+**CCC means "vulnerable"** — still paying, but the agency doubts it will
+continue. It has outsized importance because a CLO's own rulebook caps how much
+CCC it may hold, and breaching that cap diverts cash away from the investors at
+the bottom.
+
+The rating **migrates on its own chain**, separately from the credit state. That
+is deliberate and it is the point: a company is usually downgraded *while still
+paying every instalment*, and that early warning is the entire reason ratings
+exist. If the rating were derived from the credit state it could only ever
+confirm what was already obvious.
+
+### Reading the monthly report
+
+The Results screen and `portfolio_metrics.csv` carry 22 figures. Most are
+self-explanatory sums and averages; four are worth a note.
+
+**Averages are weighted by par, always.** An unweighted average would count a
+€40m facility and a €400k one alike, and describe no portfolio anyone holds.
+
+| Figure | What it tells you |
+|---|---|
+| `ccc_par_pct` | Share of the money rated CCC or worse. The number an indenture caps |
+| `largest_obligor_pct` | The biggest single borrower's share. A concentration limit in one number |
+| `wa_credit_factor` | Credit quality as a single number, **higher is worse**. Ratings are letters and cannot be averaged — there is no midpoint between B+ and CCC — so each grade is given a number standing for how likely it is to default, and those are averaged |
+| `effective_obligors` | How many borrowers the portfolio *behaves* as. A hundred borrowers where two hold half the money is not a hundred-name portfolio; this is the count adjusted for that. Compare it against the plain obligor count — the gap **is** the concentration |
+
+Both of the last two resemble measures the rating agencies publish, and neither
+reproduces one. `wa_credit_factor` uses factors computed from this pack's own
+rating chain — raise its transition matrix to the 60th power and read the
+default column — and `effective_obligors` is an inverse Herfindahl, which is
+ordinary statistics. Both are pack data you can replace. The reasoning is in
+[`clo/GENERIC-CREDIT-MEASURES.md`](clo/GENERIC-CREDIT-MEASURES.md).
+
+### Stress scenarios
+
+Pick one in **Configure → Scale**. `base` runs the calibration as written;
+`adverse` and `severe` shift it.
+
+What is worth knowing is that they do **not** shift it evenly. A uniform
+multiplier — every sector worsening by the same factor — cannot express
+concentration risk at all: every portfolio of the same size behaves identically
+however lopsided its industry mix. So the stressed scenarios lean harder on the
+sectors a downturn actually hits. Under `adverse`, a retail borrower carries
+about 2.4× the base stress while a healthcare borrower carries slightly less
+than the book as a whole.
+
+That is what makes holding a quarter of the money in one sector cost something
+in the output rather than only in the commentary.
+
+### What the pack deliberately leaves out
+
+- **No tranches, no waterfall, no OC or IC tests, no fees, no equity returns.**
+  This produces the collateral pool, not the bonds issued against it.
+- **No rating agency model.** Where a figure resembles one it is computed from
+  this project's own assumptions, and the pack file shows the arithmetic.
+- **Nothing here is investment advice, and none of the data is real.** Every
+  portfolio is synthetic, generated from declared assumptions calibrated to
+  published market ranges. It is for testing systems, training models and
+  demonstrating pipelines — not for valuing anything.
 
 ---
 

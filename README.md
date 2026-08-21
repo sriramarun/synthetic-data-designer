@@ -154,7 +154,7 @@ exercises the engine differently.
 |---|---|---|---|
 | **Shown as** | European CLO — Leveraged Loans | Dutch Green Loans — Residential Mortgages | European Auto Loans — ESMA Annex 5 |
 | Template | none — portfolio analytics | ESMA Annex 2, residential real estate | ESMA Annex 5, automobile |
-| Columns | 56 | 71 | 44 |
+| Columns | 58 | 71 | 44 |
 | Borrower | a **company**, several loans each | a household, one loan | a household, one contract |
 | Collateral | none — senior secured claim | a house, **indexed upward** | a car, **depreciating** at 15%/yr |
 | Balance | **bullet** — flat, then repaid at maturity | annuity or interest-only | annuity, with a balloon on PCP |
@@ -162,7 +162,8 @@ exercises the engine differently.
 | Ladder | watchlist → distressed → defaulted | 1-29 → 30-59 → 60-89 → 90+ DPD | 1-30 → 31-60 → 61-90 DPD |
 | Exits | prepaid, sold, **matured**, recovered | prepaid, charged off | prepaid, charged off |
 | Default → resolution | 9-month workout, then **recovery at 62%** | 9 months to write-off | 6 months, then recovery at 45% |
-| Extras | **credit ratings migrate on their own chain**; 19 monthly portfolio metrics | — | — |
+| Portfolio report | 22 metrics, 6 charts | 8 metrics, 4 charts | 9 metrics, 4 charts |
+| Extras | **credit ratings migrate on their own chain**; obligor grouping; sector-specific stress | — | — |
 | Calibrated to | demo assumptions, directional only | upstream deeploans' Dutch RMBS deal | published European prime auto ABS ranges |
 
 

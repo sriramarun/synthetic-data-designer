@@ -21,7 +21,7 @@ A six-step wizard: **Upload → Review → Configure → Generate → Results �
 Three calibrated packs are bundled, so you can see the whole thing work without
 uploading anything:
 
-- **European CLO — Leveraged Loans** (56 columns) — start here. An open
+- **European CLO — Leveraged Loans** (58 columns) — start here. An open
   portfolio of European corporate loans that trades: bullet repayment, credit
   migration through watchlist and distress, a nine-month workout after default,
   new collateral bought throughout a reinvestment period, and credit ratings
@@ -32,6 +32,25 @@ uploading anything:
 
 Load one on the first screen, press through to Generate, and you have a
 validated multi-period panel with charts and five download formats.
+
+## What this does not do
+
+It generates **the loans a fund owns**, not the fund. There are no tranches, no
+interest or principal waterfall, no OC or IC tests, no management fees, no
+tranche pricing or cash flows, and no equity returns. A CLO run gives you the
+collateral pool month by month; turning that into AAA-through-equity outcomes is
+a separate problem and a separate product.
+
+It does not replicate any rating agency's model. Where a figure resembles one —
+the average credit factor, the effective obligor count — it is computed from
+this project's own published assumptions or from ordinary statistics, and the
+pack file shows the arithmetic. Those numbers are not an agency's and should not
+be read as an agency's.
+
+**Nothing here is investment advice, and none of the data is real.** Every
+portfolio is synthetic, generated from declared assumptions calibrated to
+published market ranges. It is built for testing systems, training models and
+demonstrating pipelines — not for valuing anything.
 
 ## ⚠️ This is a shared, public demo
 
