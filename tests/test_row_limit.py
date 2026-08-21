@@ -41,6 +41,10 @@ def test_entities_alone_do_not_bound_the_row_count(tmp_path):
     )
 
 
+@pytest.mark.local_only(
+    "a caller-supplied `max_rows` governs this process; the deployment enforces its own "
+    "ceiling from its own environment, so there is no way to ask it for this one"
+)
 def test_the_ceiling_stops_a_run_that_would_exceed_it(tmp_path):
     with pytest.raises(RowLimitExceeded) as caught:
         api.run(_spec(periods=6), 500, tmp_path, seed=3, max_rows=1_000)
@@ -50,6 +54,10 @@ def test_the_ceiling_stops_a_run_that_would_exceed_it(tmp_path):
     assert "period" in message, "the message says how far it got"
 
 
+@pytest.mark.local_only(
+    "same reason: the ceiling under test is the one passed into `api.run`, and a remote "
+    "instance uses the ceiling it was deployed with"
+)
 def test_originations_cannot_grow_past_the_ceiling(tmp_path):
     """The case an entity cap misses entirely.
 

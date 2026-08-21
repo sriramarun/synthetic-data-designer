@@ -117,6 +117,9 @@ def test_a_workout_stays_a_delay(plain):
         assert learned.periods == original.periods
 
 
+@pytest.mark.local_only(
+    "needs a 72-period panel so the facilities actually mature; the instance ages up to 60"
+)
 def test_the_carve_out_comes_back(clo_long):
     """A defaulted facility does not mature, and the spec should say so.
 
@@ -316,6 +319,7 @@ def test_the_group_count_is_not_the_visible_one(clo):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.local_only("same 72-period panel, for the same reason")
 def test_structure_survives_repeated_relearning(clo_long, tmp_path):
     """Relearn a relearned spec, twice, and the structure must still be there.
 

@@ -115,6 +115,10 @@ def test_the_html_report_stands_alone(run):
     assert "http://" not in html and "https://" not in html.replace("http-equiv", "")
 
 
+@pytest.mark.local_only(
+    "the deployed API always validates; it exposes no way to ask it not to, so there is "
+    "no such run to observe"
+)
 def test_a_run_without_validation_writes_no_report(tmp_path):
     """Absent is right; an empty report would claim a check that never ran."""
     api.run(PACK, 100, tmp_path, seed=3, validate_output=False)
