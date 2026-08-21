@@ -17,7 +17,7 @@ engine as it stands at `a177797`.
 | **3** | Obligor grouping — one company, many facilities | ✅ done |
 | **4** | The standard report — 19 per-period portfolio metrics | ✅ done |
 | **5** | CLO charts — metadata-driven, built on phase 4 | ✅ done |
-| **6** | Release — deploy, docs, screenshots | ✅ done (release tests A–F outstanding) |
+| **6** | Release — deploy, docs, screenshots, release tests | ✅ done |
 | **7** | Rating migration — a second Markov chain | ✅ done |
 
 A rendered version of this document is published as an artifact for sharing.
@@ -312,7 +312,9 @@ unchanged with screenshots compared; no `if pack == "clo"` in the UI (§18).
 - **R6.6** Scope statement — v1 models the collateral portfolio, not tranche
   waterfalls, and produces no investment recommendations.
 - **R6.7** Screenshots — re-run the existing Playwright capture script.
-- **R6.8** Release tests A–F (§31).
+- **R6.8** Release tests A–F (§31). ✅ One named suite, `pytest -m release`,
+  runnable against the working tree or a deployment via `--release-target`.
+  See `docs/clo/RELEASE-TESTS.md`.
 
 **Done when:** every §29 checkbox ticked; release tests pass on the deployed
 Space, not just locally; deployed *from `main`*, after merge.

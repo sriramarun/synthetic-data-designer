@@ -16,6 +16,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKS = REPO_ROOT / "packs"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Where the §31 release suite runs.
+
+    Registered here rather than in `tests/release/conftest.py` because pytest
+    reads `pytest_addoption` only from the rootdir plugin — declared in a
+    subdirectory it is silently ignored, and the flag comes back as an
+    unrecognised argument.
+    """
+    parser.addoption(
+        "--release-target",
+        action="store",
+        default="local",
+        help=(
+            "'local' (default) runs the release suite in this process; a URL runs the "
+            "same tests against that deployed instance, e.g. "
+            "--release-target=https://example.hf.space"
+        ),
+    )
+
+
 @pytest.fixture
 def minimal_spec_dict() -> dict[str, Any]:
     return {
