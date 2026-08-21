@@ -661,9 +661,7 @@ def learn_lifecycle(
         "terminal": [str(s) for s in terminal],
         "absorbing": [str(s) for s in absorbing],
         "observed_transitions": len(observed),
-        "initial_distribution": {
-            str(k): round(float(v), 6) for k, v in initial.div(initial.sum()).items()
-        },
+        "initial_distribution": _renormalise_shares(initial.div(initial.sum())),
         "exits": learn_exits(
             ordered,
             id_column,
@@ -681,6 +679,27 @@ def learn_lifecycle(
         ),
         "confidence": 0.3 if thin else 0.85,
     }
+
+
+def _renormalise_shares(shares: pd.Series) -> dict[str, float]:
+    """Round a distribution to six places and make it sum to exactly 1.
+
+    The same residue problem `_renormalise` solves for a matrix row, on the
+    opening mix. Rounding nine rating grades independently landed a learned
+    chain on 0.999998, and the loader rejects a distribution that does not sum
+    to 1 — so profiling a perfectly ordinary tape returned a 500 whenever the
+    mix happened to round that way. Seed-dependent, which is why it survived
+    until a test picked a different one.
+    """
+    rounded = {str(k): round(float(v), 6) for k, v in shares.items()}
+    if not rounded:
+        return rounded
+    residue = round(1.0 - sum(rounded.values()), 6)
+    if residue:
+        # Into the largest share, where it is proportionally least visible.
+        biggest = max(rounded, key=lambda k: rounded[k])
+        rounded[biggest] = round(rounded[biggest] + residue, 6)
+    return rounded
 
 
 def _renormalise(row: list[float]) -> list[float]:
@@ -863,9 +882,7 @@ def _chain_matrix(
         "transitions": rows,
         "absorbing": [str(v) for v in absorbing],
         "terminal": [],
-        "initial_distribution": {
-            str(k): round(float(v), 6) for k, v in first.div(first.sum()).items()
-        },
+        "initial_distribution": _renormalise_shares(first.div(first.sum())),
         "observed_transitions": len(observed),
         "low_evidence_states": [str(v) for v in thin],
         "state_order_note": (

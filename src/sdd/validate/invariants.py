@@ -143,6 +143,8 @@ def validate_panel(
                 checks.append(_check_origination_window(spec, con))
         if toggles.group_columns_stable and spec.groups:
             checks += _check_group_columns(spec, con)
+        if spec.validation.plausibility:
+            checks += _check_plausibility(spec, con, available)
         if toggles.static_columns_stable:
             checks += _check_static_stability(spec, con, available)
         if toggles.terminal_states_absorb and spec.lifecycle:
@@ -181,6 +183,97 @@ def _run(con: duckdb.DuckDBPyConnection, name: str, description: str, sql: str) 
 # ---------------------------------------------------------------------------
 # individual checks
 # ---------------------------------------------------------------------------
+
+
+def _check_plausibility(spec: DesignSpec, con, available: set[str]) -> list[CheckResult]:
+    """Does the book look like the asset class it claims to be?
+
+    Every invariant can pass on a portfolio of four-thousand-euro loans to
+    companies in one country, all rated the same, none of them ever repaying —
+    internally consistent and obviously not a CLO. §21 asks for the other
+    question, and asks for it as *broad plausibility* rather than as a distance
+    from a reference tape, because the bundled pack has no reference tape and
+    inventing one would mean shipping vendor-derived parameters.
+
+    Reported through the same `CheckResult` the invariants use, so the bands
+    reach the validation report, the HTML artefact and the results screen for
+    free. A plausibility check nobody sees is worth nothing.
+    """
+    results: list[CheckResult] = []
+    for band in spec.validation.plausibility:
+        name = f"plausibility::{band.name}"
+        if band.column not in available:
+            results.append(
+                CheckResult(
+                    name=name,
+                    description=band.note,
+                    passed=False,
+                    error=f"{band.column!r} is not in the panel",
+                )
+            )
+            continue
+
+        scope = "panel"
+        if band.at_first_cutoff and spec.entity.time_column in available:
+            column = _ident(spec.entity.time_column)
+            scope = f"(select * from panel where {column} = (select min({column}) from panel))"
+
+        column = _ident(band.column)
+        if band.statistic == "share":
+            expression = f"count(*) filter (where {band.where}) * 1.0 / nullif(count(*), 0)"
+        elif band.statistic == "distinct":
+            expression = f"count(distinct {column})"
+        elif band.statistic == "mean":
+            expression = f"avg({column})"
+        elif band.statistic == "p10":
+            expression = f"quantile_cont({column}, 0.10)"
+        elif band.statistic == "p90":
+            expression = f"quantile_cont({column}, 0.90)"
+        else:
+            expression = f"median({column})"
+
+        low, high = band.between
+        try:
+            observed = con.execute(f"select {expression} from {scope}").fetchone()[0]
+        except Exception as exc:
+            results.append(
+                CheckResult(name=name, description=band.note, passed=False, error=str(exc))
+            )
+            continue
+
+        if observed is None:
+            results.append(
+                CheckResult(
+                    name=name,
+                    description=band.note,
+                    passed=False,
+                    error="nothing to measure",
+                )
+            )
+            continue
+
+        observed = float(observed)
+        passed = low <= observed <= high
+        results.append(
+            CheckResult(
+                name=name,
+                description=band.note,
+                passed=passed,
+                # Not a row count. A band is one number against a range, so the
+                # sample carries the number itself — a bare "1 violating row"
+                # would say nothing about how far outside it landed.
+                violations=0 if passed else 1,
+                sample=[
+                    {
+                        "statistic": band.statistic,
+                        "column": band.column,
+                        "observed": round(observed, 6),
+                        "expected_between": [low, high],
+                    }
+                ],
+            )
+        )
+    return results
 
 
 def _check_ids_unique(spec: DesignSpec, con) -> CheckResult:
