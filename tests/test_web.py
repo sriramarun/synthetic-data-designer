@@ -681,6 +681,10 @@ def test_the_row_ceiling_does_not_refuse_on_arithmetic(client, monkeypatch):
     )
 
 
+@pytest.mark.local_only(
+    "this drives the in-process web app and monkeypatches its ceiling; the run underneath "
+    "would go to the deployment, where that patched ceiling means nothing"
+)
 def test_the_row_ceiling_holds_when_originations_hide_the_size(client, monkeypatch):
     """The request that arithmetic on the payload cannot catch.
 

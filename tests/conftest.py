@@ -29,11 +29,82 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         default="local",
         help=(
-            "'local' (default) runs the release suite in this process; a URL runs the "
-            "same tests against that deployed instance, e.g. "
-            "--release-target=https://example.hf.space"
+            "'local' (default) runs in this process; a URL runs against that deployed "
+            "instance instead, e.g. --release-target=https://example.hf.space. This "
+            "redirects every `api.run` in the suite, not only the §31 release tests."
         ),
     )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "local_only(reason): the deployment cannot exercise this; skipped when "
+        "--release-target names a URL",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip what a deployment genuinely cannot run.
+
+    Kept as an explicit marker with a written reason rather than as silent
+    tolerance in the runner. Some differences between local and deployed are
+    real — the instance always validates, it caps rows, it has no PyTorch — and
+    a harness that papered over them would be reporting on itself. Marking them
+    makes the set countable, and the reason travels with the test.
+    """
+    if config.getoption("--release-target") == "local":
+        return
+    for item in items:
+        marker = item.get_closest_marker("local_only")
+        if marker is not None:
+            why = marker.args[0] if marker.args else "not available on a deployment"
+            item.add_marker(pytest.mark.skip(reason=f"local only: {why}"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _remote_target(request):
+    """Point the whole suite at a deployment, when one is named.
+
+    The seam is `sdd.api.run` itself rather than each call site. Roughly 290
+    tests call it, in every shape the signature allows, and rewriting them all
+    would be a large diff whose only content is plumbing — and would leave every
+    *future* test local-only unless its author remembered to opt in.
+
+    Patched for the session rather than per test, because each remote run is
+    seconds of network and queueing and a per-test client would pay the
+    handshake hundreds of times.
+    """
+    choice = request.config.getoption("--release-target")
+    if choice == "local":
+        yield None
+        return
+
+    from tests.remote_runner import RemoteRunner
+
+    from sdd import api
+
+    runner = RemoteRunner(choice)
+    try:
+        meta = runner.meta()
+    except Exception as exc:
+        pytest.exit(f"could not reach {choice}: {exc}", returncode=2)
+
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(
+            f"running against {choice} — version {meta.get('version', 'unknown')}, "
+            f"packs {', '.join(str(p) for p in meta.get('packs', []))}",
+            bold=True,
+        )
+
+    original = api.run
+    api.run = runner
+    try:
+        yield runner
+    finally:
+        api.run = original
+        runner.close()
 
 
 @pytest.fixture
