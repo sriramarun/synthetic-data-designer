@@ -1,5 +1,58 @@
 # synthetic-data-designer
 
+**Generate loan portfolios where you know the best score any model could achieve —
+then measure your model against it.**
+
+A credit model scores **0.84** on a lender's book. Is that good? Nobody knows. Real
+data has a ceiling too — some borrowers default for reasons nothing in the file
+predicts — and that ceiling is invisible. Every argument about model quality on real
+data is an argument about an unknown denominator.
+
+Generate the data and the denominator is computable:
+
+```python
+from sdd import api, benchmark
+
+panel = pd.read_parquet(api.run("credit_benchmark_known_ceiling", 20_000, "./out")["panel"])
+benchmark.compare(spec, panel, my_model_scores)
+```
+
+```
+  bureau score alone    0.8656   captured  91.7% of available signal
+  logistic regression   0.8987   captured 100.0%      <- the ceiling, attained
+  gradient boosting     0.8923   captured  98.4%
+                        ceiling  0.8987   oracle 0.9162
+```
+
+`0.84` becomes **"0.84 against a ceiling of 0.87"** — a statement about the *model*
+rather than a number floating free. That is the difference between a synthetic
+dataset and a **measuring instrument**, and it is what real data structurally cannot
+give you.
+
+**[→ The 60-second demo](notebooks/known_ceiling.ipynb)** · **[how it works](docs/KNOWN-CEILING.md)**
+
+### What that buys you
+
+- **Measure a credit or risk model properly.** Not "is 0.84 good?" but "the model
+  found 97% of the signal that exists."
+- **Compare across datasets.** Raw AUC is not comparable between portfolios, because
+  their ceilings differ. Share-of-available-signal is.
+- **Rehearse a validation process** — leakage checks, out-of-time splits, challenger
+  comparison — on a problem whose answer is known, before real data is involved. A
+  process that cannot recover a known answer is not ready for an unknown one.
+- **Catch what looks like success.** A model that beats the ceiling is impossible, so
+  the instrument reports it. On real data, a leaking model just looks excellent.
+- **Start on day one**, on a laptop, with nothing to sign.
+
+**What it does not tell you:** whether a model will work on a real book. This data was
+made by rules we wrote, and a model that excels at recovering them has recovered *our
+rules*. What transfers is whether a model extracts available signal and whether an
+evaluation process is sound — not predicted performance.
+
+---
+
+## And the generator underneath
+
 **Give it a structure and some sample data. It works out how the data behaves, then
 generates a synthetic portfolio and ages it forward in time.**
 
