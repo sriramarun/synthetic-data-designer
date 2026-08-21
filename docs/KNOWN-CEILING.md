@@ -66,7 +66,7 @@ more number to argue about, and the purpose here is to end an argument.
 import pandas as pd
 from sdd import api, benchmark
 
-spec  = api.load("credit_benchmark_known_ceiling")
+spec = api.load("credit_benchmark_known_ceiling")
 panel = pd.read_parquet(api.run(spec, 20_000, "./out", seed=7)["panel"])
 
 known = benchmark.ceiling(spec, panel)
