@@ -60,7 +60,7 @@ with sync_playwright() as p:
 
     page.wait_for_selector("#view-results:not([hidden])", timeout=300_000)
     page.wait_for_timeout(6000)
-    shot(page, "06-results", "Step 5 — summary, validation, and the pack's own four charts")
+    shot(page, "06-results", "Step 5 — summary, validation, and the pack's own six charts")
 
     page.locator(".rail .step[data-view=download]").click()
     page.wait_for_timeout(1200)

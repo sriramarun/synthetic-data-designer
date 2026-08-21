@@ -12,7 +12,7 @@ engine as it stands at `a177797`.
 |---|---|---|
 | **0** | Spikes — five unknowns resolved | ✅ done |
 | **1a** | Condition hazard: loans reach the end of their term | ✅ done |
-| **1b** | The CLO pack — 56 columns, 8 states, 40 invariants | ✅ done |
+| **1b** | The CLO pack — 58 columns, 8 states, 48 checks | ✅ done |
 | **2** | Aggregate targets — the portfolio has a size | ✅ done |
 | **3** | Obligor grouping — one company, many facilities | ✅ done |
 | **4** | The standard report — 19 per-period portfolio metrics | ✅ done |

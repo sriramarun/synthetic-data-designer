@@ -1430,7 +1430,7 @@ async function renderResults(result) {
     `${(result.method || "distribution").replace("_", " ")} method in ` +
     `${result.timings.total_seconds.toFixed(1)} seconds.` +
     (result.originated
-      ? ` The pool opened with ${fmt.int(result.entities)} loans and took on ` +
+      ? ` The pool opened with ${fmt.int(result.entities)} ${entityNoun()} and took on ` +
         `${fmt.int(result.originated)} more as it aged.`
       : "");
 
