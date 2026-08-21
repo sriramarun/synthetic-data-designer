@@ -156,7 +156,13 @@ def apply_indices(
         for col in idx.applies_to:
             if col not in df.columns:
                 raise DynamicsError(f"index {idx.name!r} applies to missing column {col!r}")
-            df[col] = (df[col].astype(float) * mult).round(2)
+            values = df[col].astype(float) * mult
+            # Clipped every step rather than once at the end, so the walk cannot
+            # spend twenty periods out of bounds and be pulled back at the last
+            # one. A bound that only holds on the final cut-off is not a bound.
+            if idx.clip_min is not None or idx.clip_max is not None:
+                values = values.clip(lower=idx.clip_min, upper=idx.clip_max)
+            df[col] = values.round(2)
     return df
 
 

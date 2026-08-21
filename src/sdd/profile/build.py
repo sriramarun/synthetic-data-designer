@@ -446,9 +446,39 @@ def _build_groups(data: Any, profile: DatasetProfile, spec: DesignSpec) -> list[
                     max_members=size.get("max_members"),
                 ),
                 columns=attributes,
+                correlation_target=_group_correlation(data, found["key"], attributes),
             )
         )
     return groups
+
+
+def _group_correlation(data: Any, key: str, attributes: list[Column]) -> Any:
+    """Rank correlation between the group's own numeric attributes.
+
+    **Measured one row per group, never one row per entity.** An obligor with six
+    facilities would otherwise contribute six identical rows, and the resulting
+    correlation would be weighted by how much each company happened to borrow —
+    so the companies with the most facilities would decide what the relationship
+    between revenue and leverage looks like.
+
+    This is what closes the gap the group work opened. Moving the attributes onto
+    the group made them mutually consistent *across an obligor's facilities*,
+    which is the point; it also left them drawn one generator at a time, so
+    revenue and leverage stopped moving together at all.
+    """
+    import pandas as pd
+
+    from sdd.profile.profiler import measure_correlation
+
+    numeric = [c.name for c in attributes if c.dtype in ("int", "float")]
+    if len(numeric) < 2 or not isinstance(data, pd.DataFrame) or key not in data.columns:
+        return None
+
+    per_group = data.groupby(key, sort=False)[numeric].first()
+    measured = measure_correlation(per_group.reset_index(drop=True), numeric)
+    if not measured:
+        return None
+    return CorrelationTarget(columns=measured["columns"], matrix=measured["matrix"])
 
 
 def _drop_from_correlation(spec: DesignSpec, moved: set[str]) -> None:
@@ -458,13 +488,10 @@ def _drop_from_correlation(spec: DesignSpec, moved: set[str]) -> None:
     now lives on the group makes the spec invalid — which is how this surfaced,
     as a loader error rather than as anything subtle.
 
-    Worth stating what is lost rather than only what is fixed: revenue and
-    leverage really do move together on a real book, and once both are group
-    attributes that relationship is not carried anywhere. Group attributes are
-    drawn from their own generators, marginal by marginal. The obligor's columns
-    stay mutually consistent *across its facilities*, which is the point of the
-    feature; they are no longer correlated *with each other*, which is a real
-    loss and not one this branch closes.
+    The relationship itself is not lost — it moves with the columns. Measured
+    across groups rather than across entities and attached to the group as its
+    own `correlation_target`, so revenue and leverage go on moving together
+    inside the obligor table. See `_group_correlation`.
     """
     target = spec.generation.correlation_target
     if target is None:

@@ -23,6 +23,8 @@ that broke internal consistency would not be realism, it would be corruption.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -110,11 +112,31 @@ def impose_correlation(spec: DesignSpec, df: pd.DataFrame, rng: np.random.Genera
     slider continuous — 0 leaves the columns independent, 1 reproduces the
     sample's rank correlation.
     """
-    target = spec.generation.correlation_target
+    return reorder_to_correlation(
+        df, spec.generation.correlation_target, float(spec.generation.correlation), rng
+    )
+
+
+def reorder_to_correlation(
+    df: pd.DataFrame,
+    target: Any,
+    strength: float,
+    rng: np.random.Generator,
+) -> int:
+    """The Iman-Conover reordering itself, against any frame and any target.
+
+    Split out from `impose_correlation` so a group table can use it. A group's
+    attributes are drawn marginal by marginal, one generator each, and without
+    this a company's revenue and its leverage vary independently — the same gap
+    this function already closes for entity columns, on a different frame.
+
+    Nothing here reads the spec, which is the point: there is one implementation
+    of the reordering, so entity correlation and group correlation cannot drift
+    into meaning different things.
+    """
     if target is None:
         return 0
 
-    strength = float(spec.generation.correlation)
     columns = [c for c in target.columns if c in df.columns]
     if len(columns) < 2:
         return 0

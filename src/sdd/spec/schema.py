@@ -241,6 +241,17 @@ class Group(_Base):
         description="Attributes of the group itself, generated once and shared by every "
         "member. These reach the output like any other column.",
     )
+    correlation_target: CorrelationTarget | None = Field(
+        default=None,
+        description="Rank correlation between the group's *own* numeric attributes, "
+        "reimposed by reordering the group table.\n\n"
+        "Group attributes are drawn marginal by marginal, one generator each, so without "
+        "this a company's revenue and its leverage vary independently — and a book where "
+        "the most indebted borrowers are no larger or smaller than anyone else is not a "
+        "book anyone has seen. Measured across *groups*, never across entities: an obligor "
+        "with six facilities would otherwise count six times, and the correlation would be "
+        "weighted by how much each company happened to borrow.",
+    )
     new_group_rate: float = Field(
         default=0.5,
         ge=0.0,
@@ -897,9 +908,29 @@ class Index(_Base):
     volatility: float = Field(
         default=0.0, ge=0.0, description="Per-period lognormal noise added to the drift."
     )
+    clip_min: float | None = Field(
+        default=None, description="Floor applied to the indexed column after each step."
+    )
+    clip_max: float | None = Field(
+        default=None,
+        description="Ceiling applied to the indexed column after each step.\n\n"
+        "An index with volatility is a random walk, and a random walk with nothing to stop "
+        "it wanders anywhere given enough periods. That is fine for a house-price index, "
+        "which really can run away; it is wrong wherever the quantity has an economic "
+        "bound. A leveraged loan is callable at par, so its price cannot sustain much "
+        "above 100 no matter what the market does — the borrower simply refinances. Left "
+        "unbounded, a 36-period run drifted the median price to 103.9, which no leveraged "
+        "loan book has ever printed.",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> Index:
+        if (
+            self.clip_min is not None
+            and self.clip_max is not None
+            and self.clip_min > self.clip_max
+        ):
+            raise ValueError(f"index {self.name!r} has a floor above its ceiling")
         if self.kind == "constant_drift" and self.annual is None:
             raise ValueError(f"index {self.name!r} is constant_drift but has no `annual` rate")
         if self.kind == "series" and not self.series:
@@ -1268,10 +1299,71 @@ class CustomInvariant(_Base):
     )
 
 
+PlausibilityStatistic = Literal["median", "mean", "p10", "p90", "share", "distinct"]
+
+
+class PlausibilityBand(_Base):
+    """A range a portfolio characteristic should land inside to look real.
+
+    Invariants ask "is this internally consistent?" — every one of them can pass
+    on a book whose facilities average four thousand euro. Plausibility asks the
+    other question: "does this look like the asset class it claims to be?"
+
+    Deliberately a **band, not a distance**. Scoring against a reference tape is
+    the right tool when a reference tape exists; for a bundled public pack there
+    is none, and inventing one would mean shipping vendor-derived parameters —
+    which §21 explicitly forbids. A declared range says what the pack believes
+    the market looks like, in numbers a reader can argue with.
+
+    Bands are assumptions, and are labelled as such. `note` is not optional
+    decoration: a range with no stated reason is a number nobody can challenge.
+    """
+
+    name: str = Field(description="What is being checked, e.g. 'facility_size'.")
+    column: str
+    statistic: PlausibilityStatistic = "median"
+    between: tuple[float, float] = Field(
+        description="Inclusive lower and upper bound the statistic must land inside."
+    )
+    where: str | None = Field(
+        default=None,
+        description="Expression selecting the numerator, for `share`. Ignored otherwise.",
+    )
+    at_first_cutoff: bool = Field(
+        default=False,
+        description="Measure on the opening book rather than the whole panel. Origination "
+        "facts belong here: a facility's size is decided once, and pooling it across "
+        "cut-offs weights it by how long each facility survived.",
+    )
+    note: str = Field(description="Why this range, and where it comes from.")
+
+    @model_validator(mode="after")
+    def _check(self) -> PlausibilityBand:
+        low, high = self.between
+        if low > high:
+            raise ValueError(f"plausibility band {self.name!r} has a lower bound above its upper")
+        if self.statistic == "share" and not self.where:
+            raise ValueError(
+                f"plausibility band {self.name!r} measures a share but names no `where` to "
+                "share on, so there is no numerator"
+            )
+        if self.statistic == "share" and not (0.0 <= low <= high <= 1.0):
+            raise ValueError(
+                f"plausibility band {self.name!r} is a share, so its bounds belong in [0, 1]; "
+                f"got {self.between}"
+            )
+        return self
+
+
 class Validation(_Base):
     checks: InvariantToggles = Field(default_factory=InvariantToggles)
     custom: list[CustomInvariant] = Field(default_factory=list)
     non_negative_columns: list[str] = Field(default_factory=list)
+    plausibility: list[PlausibilityBand] = Field(
+        default_factory=list,
+        description="Ranges the generated portfolio should land inside to be recognisable as "
+        "the asset class it claims to be. Reported alongside the invariants.",
+    )
 
 
 # ---------------------------------------------------------------------------

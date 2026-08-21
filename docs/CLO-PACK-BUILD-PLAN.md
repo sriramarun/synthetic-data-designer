@@ -393,6 +393,11 @@ waterfalls, OC and IC diversion mechanics, management fees, tranche pricing and
 cash flows, equity IRR, call economics, and any replication of rating-agency
 models.
 
+**§21 fidelity is done**, as plausibility bands rather than as a distance from a
+reference tape — see `docs/clo/FIDELITY-AND-GROUP-CORRELATION.md`. The custom
+calibration §21 describes stays out until a licensed vendor dataset exists,
+which is the condition the section itself puts on it.
+
 **No longer deferred:** the P1 metrics (§17) — rating factor, portfolio turnover,
 diversity proxy — and the sector stress overlay (§16). §17's warning against
 reproducing agency calculations is honoured by computing the credit factor from

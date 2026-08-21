@@ -218,13 +218,19 @@ columns:
     dtype: float
     min: 0.0
     description: Mark, per 100 of par. Drifts and wobbles; falls under stress.
+    # Bounded to the same range as the `loan_price` index that moves it after
+    # period 0. Left at its old 20-103 the opening book could print a facility
+    # at 103 which the index then pulled to 101 in the very next month — a
+    # discontinuity with no cause, and one that contradicts the reason for the
+    # ceiling: a leveraged loan is callable at par, so a price much above 100
+    # simply invites the borrower to refinance.
     generator:
       kind: gaussian
       mean: 99.0
       stddev: 1.9
       decimals: 3
-      clip_min: 20.0
-      clip_max: 103.0
+      clip_min: 40.0
+      clip_max: 101.0
 
   # -- seniority and eligibility -------------------------------------------
   - name: senior_secured_flag
@@ -859,6 +865,35 @@ groups:
           clip_min: 1.5
           clip_max: 11.0
 
+    # How the obligor's own numbers move together.
+    #
+    # Each attribute above is drawn from its own generator, so without this a
+    # company's revenue, margin and leverage vary independently — and a book
+    # where the most indebted borrowers are neither larger nor smaller nor more
+    # profitable than anyone else is one nobody has seen.
+    #
+    # Reimposed by reordering the obligor table, which cannot change any
+    # column's own distribution: every range and clip declared above survives
+    # exactly, and only the pairing changes.
+    #
+    # **These are declared assumptions, directional only** — the same standing
+    # as the rest of this pack's calibration. They are not fitted to a vendor
+    # dataset, and §21 is explicit that vendor-derived parameters must not go
+    # into the public pack. The reasoning behind each:
+    #
+    #   margin x leverage  +0.35  the strongest and the most defensible. A
+    #                             lender advances more turns of EBITDA against
+    #                             durable margins, so the two rise together.
+    #   revenue x margin   -0.15  the larger borrowers in this market skew
+    #                             toward lower-margin industrials and retail.
+    #   revenue x leverage -0.10  size buys slightly better terms.
+    correlation_target:
+      columns: [revenue_eur, ebitda_margin_pct, leverage_ratio]
+      matrix:
+        - [1.00, -0.15, -0.10]
+        - [-0.15, 1.00, 0.35]
+        - [-0.10, 0.35, 1.00]
+
 # ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
@@ -1031,6 +1066,21 @@ dynamics:
       kind: constant_drift
       annual: -0.004
       volatility: 0.010
+      # A leveraged loan is callable at par: if the price ran up, the borrower
+      # refinances and the lender is repaid at 100. So the price cannot sustain
+      # much above par however well the credit does, and the ceiling is an
+      # economic fact rather than a modelling convenience.
+      #
+      # Without it the drift plus volatility is an unbounded random walk, and a
+      # 36-period run at seed 7 reached a median price of 103.9 — a book of
+      # leveraged loans trading above par, which has never happened. The §21
+      # plausibility band is what caught it.
+      #
+      # The floor is the other end: a loan quoted below 40 is a claim in a
+      # workout, not a traded position, and this pack models the workout through
+      # the credit state instead.
+      clip_min: 40.0
+      clip_max: 101.0
 
   recovery:
     rate: 0.62
@@ -1446,6 +1496,133 @@ validation:
     - recovery_amount
     - realised_loss
     - months_to_maturity
+
+  # -------------------------------------------------------------------------
+  # §21 plausibility — does this look like a European leveraged loan book?
+  # -------------------------------------------------------------------------
+  #
+  # The invariants above ask whether the panel is internally consistent. Every
+  # one of them passes on a portfolio of four-thousand-euro loans to companies
+  # in one country, all rated the same, none of them ever repaying. These ask
+  # the other question.
+  #
+  # **These ranges come from the market, not from this pack's output.** That
+  # distinction is the whole value of the section: bands fitted to whatever the
+  # generator currently produces can never fail, and would quietly encode the
+  # pack's own quirks as "plausible". Setting them from published market ranges
+  # means the pack can be caught drifting. All eleven pass as shipped, and the
+  # tests include a negative control showing they fail when the book moves.
+  #
+  # §21 asks for broad plausibility rather than a distance from a reference
+  # tape, and is explicit that vendor-derived parameters must not reach the
+  # public pack. These are published-range assumptions, directional only, and a
+  # reader who disagrees should edit them.
+  plausibility:
+    - name: facility_size
+      column: original_facility_amount
+      statistic: median
+      at_first_cutoff: true
+      between: [400000.0, 10000000.0]
+      note: >-
+        Median facility size. A CLO holds a few hundred positions in loans that
+        are themselves much larger — the deal takes a slice. Positions of a few
+        hundred thousand to a few million are the usual range.
+
+    - name: spread
+      column: spread_bps
+      statistic: median
+      at_first_cutoff: true
+      between: [300.0, 600.0]
+      note: >-
+        Median margin over the reference rate, in basis points. European
+        term loan B pricing has sat in the high 300s to low 500s for years.
+
+    - name: market_price
+      column: current_market_price
+      statistic: median
+      between: [88.0, 101.0]
+      note: >-
+        Median secondary price per 100 of par. Performing European loans trade
+        near par; a median below the high 80s would mean a distressed book.
+
+    - name: maturity
+      column: original_term_months
+      statistic: median
+      at_first_cutoff: true
+      between: [60.0, 96.0]
+      note: >-
+        Median original term. Leveraged loans are written for five to eight
+        years, and a CLO's reinvestment rules assume that horizon.
+
+    - name: leverage
+      column: leverage_ratio
+      statistic: median
+      at_first_cutoff: true
+      between: [3.5, 7.0]
+      note: >-
+        Median net debt to EBITDA. Below about 3.5x a borrower is not
+        leveraged; much above 7x the loan is not broadly syndicated.
+
+    - name: rating_mix
+      column: rating_bucket
+      statistic: share
+      where: "rating_bucket = 'B'"
+      at_first_cutoff: true
+      between: [0.35, 0.85]
+      note: >-
+        Share of the opening book in the single-B bucket. Leveraged loans are
+        overwhelmingly single-B; a book that were not would be a different
+        asset class.
+
+    - name: ccc_at_close
+      column: rating_bucket
+      statistic: share
+      where: "rating_bucket in ('CCC', 'D')"
+      at_first_cutoff: true
+      between: [0.0, 0.10]
+      note: >-
+        CCC and below at close. Indentures cap this around 7.5%, and a deal
+        prices with headroom beneath the cap rather than against it. Measured
+        at the opening cut-off: migration is expected to push it up later, and
+        that rise is the thing the CCC chart exists to show.
+
+    - name: country_spread
+      column: obligor_country
+      statistic: distinct
+      at_first_cutoff: true
+      between: [5.0, 25.0]
+      note: >-
+        Distinct obligor countries. A European CLO spans several jurisdictions
+        by construction; one or two would not be a European deal.
+
+    - name: industry_spread
+      column: industry
+      statistic: distinct
+      at_first_cutoff: true
+      between: [8.0, 40.0]
+      note: >-
+        Distinct industries. Diversity requirements make a concentrated book
+        impossible to place.
+
+    - name: seniority
+      column: senior_secured_flag
+      statistic: share
+      where: "senior_secured_flag = 'Y'"
+      at_first_cutoff: true
+      between: [0.85, 1.0]
+      note: >-
+        Senior secured share. Indentures generally require at least 90% senior
+        secured, so a book much below that could not be issued.
+
+    - name: covenant_lite
+      column: covenant_lite_flag
+      statistic: share
+      where: "covenant_lite_flag = 'Y'"
+      at_first_cutoff: true
+      between: [0.55, 0.98]
+      note: >-
+        Covenant-lite share. European issuance has been overwhelmingly
+        covenant-lite since around 2018.
 
   custom:
     - name: credit_factor_matches_the_rating
