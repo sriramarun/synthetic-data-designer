@@ -32,12 +32,16 @@ def built():
     return result, charts, {c["title"]: c for c in charts["configured"]}
 
 
-def test_the_pack_gets_the_four_charts_the_specification_asks_for(built):
+def test_the_pack_gets_the_charts_the_specification_asks_for(built):
     _, _, by_title = built
     assert set(by_title) == {
         "Portfolio par",
         "Credit state",
         "CCC share of par",
+        # The two that came with the P1 metrics: credit quality as one number,
+        # and diversity as a count rather than an agency's index.
+        "Effective obligors",
+        "Average credit factor",
         "Industry concentration",
     }
 
@@ -104,15 +108,41 @@ def test_a_chart_that_cannot_be_built_does_not_lose_the_others():
     assert not by_title["Portfolio par"].get("unavailable")
 
 
-def test_the_shipped_packs_without_charts_keep_the_generic_ones(tmp_path):
+def test_a_pack_that_declares_no_charts_keeps_the_generic_ones(tmp_path):
     """Nothing here knows which pack it is. A pack that declares nothing gets
-    the column-sniffing fallback, exactly as before."""
-    for pack in ("rmbs_nl_green_lion", "auto_abs_esma_annex5"):
-        assert api.load(pack).results.charts == []
-        result = api.run(pack, 150, tmp_path / pack, seed=3, validate_output=False)
-        charts = api.charts(pack, result["panel"])
-        assert charts["configured"] == []
-        assert charts["delinquency"] is not None, f"{pack} lost its generic charts"
+    the column-sniffing fallback, exactly as before.
+
+    This used to run against the two shipped packs that declared no charts. All
+    three declare charts now — the genericity claim is worth little if only the
+    pack a feature was built for exercises it — so the case is constructed.
+    """
+    spec = api.load("rmbs_nl_green_lion").model_dump(mode="json", exclude_none=True, by_alias=True)
+    spec.pop("results", None)
+    spec["metrics"] = []
+
+    result = api.run(spec, 150, tmp_path / "bare", seed=3, validate_output=False)
+    charts = api.charts(spec, result["panel"])
+    assert charts["configured"] == []
+    assert charts["delinquency"] is not None, "the generic charts are gone"
+
+
+def test_every_shipped_pack_draws_its_own_charts(tmp_path):
+    """The genericity claim, checked rather than asserted.
+
+    Three asset classes, one chart vocabulary, and every chart has to produce
+    points — a chart declared against a metric that does not exist renders as an
+    empty box rather than as an error anywhere.
+    """
+    for pack in api.list_packs():
+        result = api.run(pack, 200, tmp_path / pack, seed=3, validate_output=False)
+        charts = api.charts(pack, result["panel"], metrics=result["metrics"])
+        configured = charts["configured"]
+        assert configured, f"{pack} draws nothing of its own"
+        for chart in configured:
+            assert not chart.get("unavailable"), f"{pack}: {chart['title']} {chart['unavailable']}"
+            assert chart.get("values") or chart.get("series") or chart.get("categories"), (
+                f"{pack}: {chart['title']} drew nothing"
+            )
 
 
 def test_a_series_can_read_a_column_when_there_is_no_metric(tmp_path):

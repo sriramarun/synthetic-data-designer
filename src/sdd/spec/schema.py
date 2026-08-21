@@ -1103,6 +1103,32 @@ class Scenario(_Base):
         default=0.0, description="Additive shift, in percentage points, to interest-rate columns."
     )
     rate_columns: list[str] = Field(default_factory=list)
+    segment_stress: dict[str, dict[str, float]] = Field(
+        default_factory=dict,
+        description="Column -> {value -> multiplier}, stressing only the entities in that "
+        "segment. `{industry: {Retail: 3.0, Energy: 2.5}}` triples the chance of a retail "
+        "borrower slipping while leaving everyone else on the base calibration.\n\n"
+        "`default_multiplier` moves the whole book at once, which is not how a downturn "
+        "arrives: 2008 was not every sector worsening by the same factor. A recession lands "
+        "on the sectors exposed to it, and a portfolio's real risk is how much of it sits in "
+        "those sectors — which a uniform multiplier cannot express, because it leaves the "
+        "concentration figures untouched no matter how severe it gets.\n\n"
+        "Multiplies with `default_multiplier` rather than replacing it, so a scenario can "
+        "raise the whole book and lean harder on part of it.",
+    )
+
+    @model_validator(mode="after")
+    def _check_segments(self) -> Scenario:
+        for column, table in self.segment_stress.items():
+            for value, multiplier in table.items():
+                if multiplier <= 0:
+                    raise ValueError(
+                        f"scenario {self.name!r} stresses {column}={value!r} by "
+                        f"{multiplier}, which is not a multiplier. Use a value above 1.0 to "
+                        "worsen and below 1.0 to improve; 0 would mean the segment can never "
+                        "change state again"
+                    )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -1348,6 +1374,8 @@ MetricKind = Literal[
     "share_where",  # what fraction of a total meets a condition
     "max_group_share",  # the largest single group's share of a total
     "cumulative",  # a running total across cut-offs
+    "effective_count",  # how many groups the book behaves as, given concentration
+    "turnover",  # how much of the book left since the last cut-off
 ]
 
 
@@ -1371,7 +1399,14 @@ class Metric(_Base):
         default=None, description="The column being measured. Not needed by `count`."
     )
     weight: str | None = Field(default=None, description="Weighting column, for `weighted_mean`.")
-    group: str | None = Field(default=None, description="Grouping column, for `max_group_share`.")
+    group: str | None = Field(
+        default=None,
+        description="Grouping column, for `max_group_share` and `effective_count`.",
+    )
+    entity_column: str | None = Field(
+        default=None,
+        description="Identifier column, for `turnover`. Defaults to the entity's own id.",
+    )
     where: str | None = Field(
         default=None,
         description="Expression restricting which rows count, e.g. \"ccc_flag == 'Y'\". For "
@@ -1391,6 +1426,11 @@ class Metric(_Base):
             )
         if self.kind == "max_group_share" and not self.group:
             raise ValueError(f"metric {self.name!r} is a group share with no `group`")
+        if self.kind == "effective_count" and not self.group:
+            raise ValueError(
+                f"metric {self.name!r} counts effective groups but names no `group` to count. "
+                "Without one there is nothing to be concentrated in"
+            )
         if self.kind == "share_where" and not self.where:
             raise ValueError(f"metric {self.name!r} is a share with no `where` to share on")
         return self

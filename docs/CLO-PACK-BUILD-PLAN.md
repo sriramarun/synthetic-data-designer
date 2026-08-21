@@ -251,13 +251,16 @@ metrics:
 - **M4.4** Output `portfolio_metrics.parquet` and `.csv`.
 - **M4.5** Metric series in the `api.run` payload.
 - **M4.6** Sixth download format.
-- **M4.7** CLO metrics (§17) — all 19 P0. P1 metrics deferred; §17 warns off
-  proprietary agency calculations and that warning should be honoured.
+- **M4.7** CLO metrics (§17) — all 19 P0. ✅ The three P1 metrics landed later,
+  once §17's warning off proprietary agency calculations could be honoured by
+  deriving them generically rather than by omitting them. 22 metrics.
 - **M4.8** Reconciliation invariant (§20) — portfolio totals tie to
   facility-level totals. This is what makes the report trustworthy.
 - **M4.9** Prove genericity — add three metrics to the RMBS pack (WA coupon, WA
   seasoning, arrears share). If they do not fall out naturally, the abstraction
-  is wrong.
+  is wrong. ✅ Done with the P1 tail, and wider than planned: all three packs now
+  carry a full report, including the two metric kinds added for the CLO applied
+  to manufacturers and provinces.
 
 **Done when:** all 19 P0 metrics per cut-off; reconciliation invariant passes;
 RMBS carries metrics with no CLO-specific code; §29 item 12 passes.
@@ -388,9 +391,12 @@ waterfalls, OC and IC diversion mechanics, management fees, tranche pricing and
 cash flows, equity IRR, call economics, and any replication of rating-agency
 models.
 
-Also deferred within this plan: P1 metrics (§17) — rating factor, portfolio
-turnover, diversity proxy; and the sector stress overlay (§16), which the spec
-itself marks P1.
+**No longer deferred:** the P1 metrics (§17) — rating factor, portfolio turnover,
+diversity proxy — and the sector stress overlay (§16). §17's warning against
+reproducing agency calculations is honoured by computing the credit factor from
+this pack's own rating chain and the diversity proxy as an inverse Herfindahl,
+rather than by leaving them out. See `docs/clo/P1-TAIL-REPORT.md` and
+`docs/clo/GENERIC-CREDIT-MEASURES.md`.
 
 **Rating migration is no longer out of scope.** It moved to Phase 7 — see
 `docs/clo/ADR-001-second-markov-chain.md` for why, and for the tests that keep

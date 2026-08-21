@@ -369,6 +369,15 @@ columns:
     description: Coarse grouping of the letter grade.
     generator: {kind: constant, value: "B"}
 
+  - name: credit_factor
+    role: dynamic
+    dtype: int
+    min: 0.0
+    description: >-
+      Numeric stand-in for the letter grade, so grades can be averaged.
+      Derived from this pack's own rating chain — see the derivation.
+    generator: {kind: constant, value: 0}
+
   - name: watchlist_flag
     role: dynamic
     dtype: category
@@ -605,6 +614,39 @@ derivations:
       - {if: "isin(rating_at_cutoff, ['B+', 'B', 'B-'])", then: "B"}
       - {if: "rating_at_cutoff == 'D'", then: "D"}
     else: "CCC"
+
+  # -- credit factor --------------------------------------------------------
+  #
+  # A number standing for how likely a grade is to default, so that grades can
+  # be averaged. Ratings are labels — the mean of "B+" and "CCC" is not a
+  # thing — and a portfolio still needs a single figure for its credit quality.
+  #
+  # **Where these numbers come from, and why it matters.** They are not any
+  # agency's table. Each is the probability that this pack's *own* rating chain
+  # reaches D within five years, starting from that grade, multiplied by 10,000
+  # and rounded. Take the `transitions` matrix under `secondary_chains` below,
+  # raise it to the 60th power, and read the column for D: that is this column.
+  # Anyone can reproduce them from this file alone.
+  #
+  # Two consequences worth stating. They are *internally consistent* — the
+  # factor and the migration behaviour are the same model, so a book that
+  # downgrades faster genuinely reads worse. And they are *substitutable*: this
+  # is ordinary pack data, so anyone holding a licence to an agency's published
+  # factors can paste them in here and change nothing else.
+  - target: credit_factor
+    kind: when
+    stage: both
+    dtype: int
+    rules:
+      - {if: "rating_at_cutoff == 'BB'", then: 618}
+      - {if: "rating_at_cutoff == 'BB-'", then: 854}
+      - {if: "rating_at_cutoff == 'B+'", then: 1195}
+      - {if: "rating_at_cutoff == 'B'", then: 1717}
+      - {if: "rating_at_cutoff == 'B-'", then: 2522}
+      - {if: "rating_at_cutoff == 'CCC+'", then: 3562}
+      - {if: "rating_at_cutoff == 'CCC'", then: 4575}
+      - {if: "rating_at_cutoff == 'CCC-'", then: 5611}
+    else: 10000
 
   # -- flags, all read off the state or the rating --------------------------
   - target: watchlist_flag
@@ -1034,6 +1076,24 @@ scenarios:
     index_shift: {loan_price: -0.06}
     rate_shift: 1.25
     rate_columns: [reference_rate_pct]
+    # A downturn does not arrive evenly, and a multiplier that moves the whole
+    # book cannot say so. These are the sectors a consumer-led recession lands
+    # on hardest; they multiply with the 3.0 above, so a retail borrower carries
+    # 3.0 x 2.4 while a healthcare borrower carries 3.0 x 1.0.
+    #
+    # This is the difference between a stress that a concentrated portfolio
+    # survives and one it does not. Under a uniform multiplier every book of the
+    # same size behaves identically however lopsided its sector mix; under this
+    # one, holding a quarter of the money in retail finally costs something.
+    segment_stress:
+      industry:
+        Retail: 2.4
+        Consumer Products: 1.9
+        Media: 1.7
+        Transportation: 1.5
+        Energy: 1.4
+        Healthcare: 0.9
+        Business Services: 0.95
 
   severe:
     name: severe
@@ -1046,6 +1106,18 @@ scenarios:
     index_shift: {loan_price: -0.14}
     rate_shift: 2.25
     rate_columns: [reference_rate_pct]
+    # The same sectors, leaned on harder, and the defensive ones no longer
+    # spared: in a severe case nothing is genuinely counter-cyclical.
+    segment_stress:
+      industry:
+        Retail: 3.2
+        Consumer Products: 2.4
+        Media: 2.1
+        Transportation: 1.8
+        Energy: 1.7
+        Chemicals: 1.4
+        Healthcare: 1.0
+        Business Services: 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1239,63 @@ metrics:
     column: realised_loss
     decimals: 2
 
+  # -- the three §17 marks P1 -----------------------------------------------
+  #
+  # §17 warns off replicating a rating agency's calculations, and that warning
+  # is honoured here: none of these is an agency measure under another name.
+  # Each answers the question the agency measure answers, from arithmetic that
+  # is either this pack's own or textbook statistics.
+
+  # Average credit quality as one number. Ratings are labels, so they cannot be
+  # averaged directly; `credit_factor` is the numeric stand-in and this is its
+  # par-weighted mean. Falls as the book is downgraded, and rises sharply on a
+  # default because a defaulted facility carries the maximum factor.
+  #
+  # A weighted mean and nothing more — the existing metric kind, unchanged. That
+  # it needed no new machinery is the evidence that the abstraction was right.
+  - name: wa_credit_factor
+    kind: weighted_mean
+    column: credit_factor
+    weight: current_par
+    decimals: 1
+    description: >-
+      Par-weighted average credit factor. Higher is worse. Derived from this
+      pack's own rating chain, not from any agency's published table.
+
+  # How many obligors the book *behaves* as, once concentration is taken into
+  # account. A hundred obligors where two carry half the money is not a
+  # hundred-name portfolio, and `active_obligors` says it is.
+  #
+  # The inverse Herfindahl: one over the sum of squared obligor shares. Ordinary
+  # statistics, not anyone's model, and directly comparable to the plain obligor
+  # count — the gap between the two is the concentration.
+  - name: effective_obligors
+    kind: effective_count
+    column: current_par
+    group: obligor_id
+    decimals: 2
+    description: >-
+      Effective number of independent obligors, given how the par is spread.
+      Equals the obligor count for a perfectly even book and falls below it as
+      money concentrates.
+
+  # How much of the book changed hands. A managed pool sells, prepays and
+  # reinvests, and total par can sit almost flat through all of it — so the size
+  # of the book says nothing about how much of it turned over.
+  #
+  # Departures only, as a share of the previous cut-off's par. Counting arrivals
+  # as well would report a pool that replaced every asset as 200% turned over.
+  # The first cut-off reports nothing rather than zero: a book cannot have
+  # turned over before it existed.
+  - name: portfolio_turnover
+    kind: turnover
+    column: current_par
+    entity_column: facility_id
+    decimals: 6
+    description: >-
+      Par that left the pool since the last cut-off, as a share of the par
+      that was there.
+
 
 # ---------------------------------------------------------------------------
 # results — what to draw
@@ -1223,6 +1352,37 @@ results:
         CCC it may hold, and breaching that cap diverts cash away from the investors at the
         bottom. Ratings move on their own here, so this can climb well before any loan is
         visibly in trouble — which is the early warning a rating is for.
+
+    - kind: series
+      title: Effective obligors
+      metric: effective_obligors
+      unit: count
+      description: How many independent borrowers the book behaves as, once concentration
+        is taken into account. Always at or below the plain obligor count.
+      explain: >-
+        Counting borrowers treats a portfolio with a hundred names as diversified even if
+        two of them carry half the money. This line is the count adjusted for that: it is
+        one divided by the sum of each borrower's squared share of the money — a standard
+        statistic, not a rating agency's model. A hundred equal borrowers score 100; move
+        half the money into two of them and the score falls to about 8. The gap between
+        this line and the plain borrower count IS the concentration, which is why it is
+        drawn as a count rather than as an index nobody can interpret.
+
+    - kind: series
+      title: Average credit factor
+      metric: wa_credit_factor
+      unit: number
+      description: Credit quality as a single par-weighted number. Higher is worse. It
+        climbs as the book is downgraded and jumps when a facility defaults.
+      explain: >-
+        Ratings are letters, and letters cannot be averaged — there is no midpoint between
+        B+ and CCC. So each grade is given a number standing for how likely it is to end in
+        default, and those numbers are averaged, weighted by how much money sits in each.
+        HIGHER MEANS WORSE. The numbers here are not any agency's published table: each is
+        the chance that this pack's own rating model reaches default within five years from
+        that grade, times 10,000. That makes the figure internally consistent — the score
+        and the migration behaviour are the same model — and replaceable, since anyone
+        licensed to use an agency's factors can substitute them in the pack file.
 
     - kind: category_bar
       title: Industry concentration
@@ -1288,6 +1448,39 @@ validation:
     - months_to_maturity
 
   custom:
+    - name: credit_factor_matches_the_rating
+      description: >-
+        Every facility's credit factor is the one its grade maps to. The factor
+        is what the average credit quality is computed from, so a factor that
+        has drifted from the rating would corrupt the headline figure while every
+        rating on the tape still looked right.
+      sql: |
+        select rating_at_cutoff, count(distinct credit_factor) as factors
+        from panel
+        group by 1
+        having count(distinct credit_factor) > 1
+
+    - name: credit_factor_is_monotone_in_the_grade
+      description: >-
+        A worse grade never carries a lower factor. This is what makes the
+        weighted average mean anything: if the ordering broke, a downgrade could
+        improve the reported credit quality.
+      sql: |
+        with grades as (
+          select 'BB' as g, 1 as ord union all select 'BB-', 2 union all
+          select 'B+', 3 union all select 'B', 4 union all select 'B-', 5 union all
+          select 'CCC+', 6 union all select 'CCC', 7 union all select 'CCC-', 8 union all
+          select 'D', 9
+        ),
+        f as (
+          select p.rating_at_cutoff, g.ord, max(p.credit_factor) as factor
+          from panel p join grades g on g.g = p.rating_at_cutoff
+          group by 1, 2
+        )
+        select a.rating_at_cutoff, a.factor, b.rating_at_cutoff as worse, b.factor as worse_factor
+        from f a join f b on b.ord > a.ord
+        where b.factor < a.factor
+
     - name: no_duplicate_facility_cutoff
       description: One row per facility per cut-off.
       sql: |
