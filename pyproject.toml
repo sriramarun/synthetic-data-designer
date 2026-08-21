@@ -82,7 +82,7 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not release'"
 # Several tests import `tests.conftest` for the packs directory. `python -m
 # pytest` puts the working directory on sys.path and bare `pytest` does not, so
 # without this the suite passes locally and fails in CI — which is exactly what
@@ -91,4 +91,5 @@ pythonpath = ["."]
 markers = [
     "slow: tests that generate large datasets (deselect with '-m \"not slow\"')",
     "upstream: tests that require the upstream deeploans checkout + data-designer",
+    "release: the section 31 release scenarios; run with -m release, and add --release-target=<url> to run them against a deployment instead of this working tree",
 ]
