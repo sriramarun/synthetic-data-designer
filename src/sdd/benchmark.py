@@ -107,7 +107,7 @@ def label_outcome(spec: DesignSpec, panel: pd.DataFrame) -> pd.Series:
         raise BenchmarkError(f"the panel has no {state!r} column to read an outcome from")
 
     bad = set(panel.loc[panel[state].isin(bench.label_states), id_column])
-    entities = pd.Index(sorted(panel[id_column].unique()), name=id_column)
+    entities = _plain_index(pd.Index(panel[id_column].unique()).sort_values(), id_column)
     return pd.Series(entities.isin(bad).astype(int), index=entities, name="outcome")
 
 
@@ -125,7 +125,26 @@ def observables(spec: DesignSpec, panel: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in columns if c not in panel.columns]
     if missing:
         raise BenchmarkError(f"the panel is missing declared observables: {missing}")
-    return opening.set_index(id_column)[columns].sort_index()
+
+    seen = opening.set_index(id_column)[columns].sort_index()
+    seen.index = _plain_index(seen.index, id_column)
+    return seen
+
+
+def _plain_index(index: pd.Index, name: str) -> pd.Index:
+    """An index scikit-learn can slice.
+
+    Parquet round-trips identifiers back as Arrow-backed strings under pandas 3,
+    and `train_test_split` indexes its inputs positionally with an integer
+    array — which an Arrow-backed index refuses, with
+    `TypeError: only integer scalar arrays can be converted to a scalar index`.
+
+    Found in CI rather than here: pandas 2 hands back a plain object index for
+    the same file, so the same code passed locally and failed on three Python
+    versions. Normalised at the boundary so callers never meet it, since the
+    obvious thing to do with these frames is hand them to scikit-learn.
+    """
+    return pd.Index(index.to_numpy(dtype=object), name=name)
 
 
 def ceiling(

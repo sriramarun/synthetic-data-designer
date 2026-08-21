@@ -45,6 +45,30 @@ def known(generated):
 # ---------------------------------------------------------------------------
 
 
+def test_an_arrow_backed_panel_can_still_be_split(generated):
+    """A panel read back under pandas 3, handed to scikit-learn.
+
+    Parquet returns identifiers as Arrow-backed strings there, and
+    `train_test_split` indexes positionally with an integer array — which an
+    Arrow-backed index refuses outright. The same code passed on pandas 2 and
+    failed on all three Python versions in CI, so the dtype is forced here to
+    keep the regression reproducible on either version.
+    """
+    from sklearn.model_selection import train_test_split
+
+    spec, panel = generated
+    arrow = panel.copy()
+    arrow[spec.entity.id_column] = arrow[spec.entity.id_column].astype("string[pyarrow]")
+
+    features = benchmark.observables(spec, arrow)
+    labels = benchmark.label_outcome(spec, arrow)
+    train, test = train_test_split(features.index, test_size=0.3, random_state=0, stratify=labels)
+
+    assert len(train) and len(test)
+    assert not set(train) & set(test)
+    assert benchmark.ceiling(spec, arrow).ceiling > 0.5
+
+
 def test_the_driver_never_reaches_the_output(generated):
     """The asymmetry the whole instrument rests on.
 
