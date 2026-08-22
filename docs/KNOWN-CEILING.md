@@ -1,6 +1,7 @@
 # The known ceiling
 
-How to measure a model against the best score anything could achieve, and why that
+How to measure a model against the maximum achievable from the permitted
+observables, and why that
 is a different kind of claim from "our synthetic data is realistic".
 
 ## The problem it solves

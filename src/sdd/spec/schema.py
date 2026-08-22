@@ -1465,7 +1465,7 @@ class Evaluation(_Base):
 
 
 class Benchmark(_Base):
-    """How to compute the best score any model could achieve on this data.
+    """How to compute the maximum achievable from the permitted observables.
 
     Every other section describes what to generate. This one describes how the
     data was generated *well enough to invert* — which is the difference between
