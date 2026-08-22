@@ -36,6 +36,9 @@ this outcome and metric.* It is not a universal bound, and a model beating it me
 the ceiling is wrong or the model saw something it should not have — which is why
 that case is reported rather than celebrated.
 
+**New to any of this?** [`docs/WHAT-IS-SDD.md`](docs/WHAT-IS-SDD.md) explains the
+whole tool from zero — no jargon without a definition, no finance background assumed.
+
 ### ▶ Start here — the worked example
 
 **[`notebooks/known_ceiling.ipynb`](notebooks/known_ceiling.ipynb)** — a credit-risk
@@ -142,8 +145,13 @@ spec file, and a profiler can write that spec for you by reading your data.
 ## Try it
 
 ```bash
+git clone https://github.com/sriramarun/synthetic-data-designer
+cd synthetic-data-designer
 pip install -e '.[dev,web]'
 ```
+
+The `-e '.[dev,web]'` installs *this checkout*, which is why there is no package
+name in it. Not yet on PyPI — until it is, install from the repository.
 
 ```bash
 sdd ui
@@ -414,7 +422,7 @@ close that gap, in increasing cost:
    appears. The **Correlation** control scales it continuously, 0 to 1. On the RMBS
    round trip this takes the largest pairwise correlation error from **~1.0 to
    0.08**.
-3. **A deep model.** The optional CTGAN/TVAE polish (`pip install 'sdd[deep]'`)
+3. **A deep model.** The optional CTGAN/TVAE polish (`pip install -e '.[deep]'`)
    learns the joint distribution from a real seed dataset. Slow, needs the real
    tape, and not auditable — so the fidelity report shows before and after, and the
    step has to earn its keep.

@@ -26,7 +26,7 @@ A hosted instance is a good **demo** and a bad **workbench**.
 The install is two lines, so pointing people at a local run costs them very little:
 
 ```bash
-pip install 'sdd[web]'
+pip install 'synthetic-data-designer[web] @ git+https://github.com/sriramarun/synthetic-data-designer'
 sdd ui
 ```
 

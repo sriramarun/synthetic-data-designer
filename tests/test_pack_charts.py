@@ -173,3 +173,19 @@ def test_a_series_can_read_a_column_when_there_is_no_metric(tmp_path):
 def test_an_underspecified_chart_is_refused_at_load_time(bad):
     with pytest.raises(ValueError):
         ChartSpec(**bad)
+
+
+def test_exactly_one_pack_is_featured():
+    """ "Start here" pointing at two places tells a reader nothing.
+
+    It happened: adding the benchmark pack left both it and the CLO flagged
+    `featured`, so two cards went purple and both claimed to be the entry point.
+    The colour is the strongest signal on that screen and it has to mean one
+    thing.
+    """
+    featured = [name for name in api.list_packs() if api.load(name).meta.featured]
+    assert len(featured) == 1, f"expected one featured pack, found {featured}"
+
+    # And it must be the one shown first, or the highlight sits below something
+    # unhighlighted and reads as decoration rather than direction.
+    assert api.list_packs()[0] == featured[0]

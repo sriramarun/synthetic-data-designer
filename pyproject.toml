@@ -3,7 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sdd"
+# The distribution name. NOT `sdd`: that is taken on PyPI by an unrelated
+# video-detection library, so `pip install sdd` installs someone else's package
+# and this one could never be published under it. The *import* name stays `sdd`
+# — `from sdd import api` — which is the part users type most.
+name = "synthetic-data-designer"
 version = "0.1.0"
 description = "Spec-driven synthetic data designer for structured finance loan tapes and panels"
 readme = "README.md"
