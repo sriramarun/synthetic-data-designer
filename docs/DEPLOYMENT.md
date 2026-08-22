@@ -9,6 +9,7 @@ that promise false, and everything in this document follows from that.
 - [What changes when it is shared](#what-changes-when-it-is-shared)
 - [Configuration](#configuration)
 - [Any other host](#any-other-host)
+- [What will not work: Vercel, and serverless generally](#what-will-not-work-vercel-and-serverless-generally)
 
 ---
 
@@ -213,6 +214,69 @@ Three things any host needs:
 
 For a private team instance, put it behind whatever SSO you already have and
 leave `SDD_SHARED` unset only if the workspace genuinely is private to that team.
+
+---
+
+## What will not work: Vercel, and serverless generally
+
+Worth stating plainly, because the failure is not obvious from the error message.
+
+Vercel refuses the repository with:
+
+```
+Error: No FastAPI entrypoint found in default locations
+Add this to your pyproject.toml:
+  [tool.vercel]
+  entrypoint = "src.sdd.cli:app"
+```
+
+**Do not take that suggestion.** `src/sdd/cli.py`'s `app` is a **Typer** command-line
+application, not a FastAPI one — Vercel found the name and guessed. The FastAPI app is
+`src.sdd.web.app:app`.
+
+But pointing it at the right module does not fix anything, because three things
+independently prevent this app from running on a serverless platform.
+
+**1. It is too big.** Serverless functions cap at 250 MB unzipped. The dependencies
+alone are around 360 MB:
+
+| | |
+|---|---:|
+| pyarrow | 112 MB |
+| scipy | 96 MB |
+| pandas | 67 MB |
+| scikit-learn | 45 MB |
+| numpy | 31 MB |
+| everything else | ~9 MB |
+| **total** | **~360 MB** |
+
+None is optional. Parquet needs pyarrow, the distributions and the Bayes inversion
+need scipy, and the whole engine is built on pandas.
+
+**2. A run outlives its request.** `POST /api/run` starts work on a background thread
+and returns a job id immediately; the browser then polls `GET /api/run/{id}`. On a
+serverless platform the container may freeze the moment the response is sent, killing
+the thread mid-run — and the poll usually lands on a *different* instance, where the
+in-memory job table is empty. The client would see a job that never finishes and then
+a 404.
+
+**3. There is nowhere to put the output.** A run writes a panel, per-cut-off files, a
+manifest and two validation reports, and `/api/download` serves them afterwards.
+Serverless filesystems are per-instance and disappear; the download would 404 from any
+instance but the one that happened to generate it.
+
+Runtime is *not* the problem, incidentally — a default 500-entity run takes about a
+second. The blockers are size, statefulness and storage.
+
+### What to use instead
+
+Anything that runs a container. The
+[Dockerfile](../deploy/huggingface/Dockerfile) is a plain one with nothing
+Hugging-Face-specific in it beyond the port, so Fly.io, Render, Railway, Cloud Run,
+App Runner or a VM all work with the same image.
+
+If the attraction of Vercel is a custom domain or a CDN, put it in front of a
+container host rather than trying to run the app inside it.
 
 ---
 
