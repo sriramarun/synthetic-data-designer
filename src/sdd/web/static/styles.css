@@ -546,27 +546,20 @@ details.group > summary:focus-visible { outline: 2px solid var(--accent); outlin
 .g-body > .sub-head:first-child { margin-top: 12px; padding-top: 0; border-top: 0; }
 
 /* ------------------------------------------------------------ featured pack
-   One pack is the one to try first. Marked with its own colour rather than the
-   accent, because the accent already means "this is the action" all over the
-   page and reusing it here would say only that a pack is a button. */
+   One pack is the one to try first, and it is marked by weight rather than by
+   hue: a heavier border, a heavier name, and a small label.
 
-:root {
-  --feature:    #6b4fa8;
-  --feature-bg: #f3effa;
-  --feature-line: #d6c9ef;
-}
-:root[data-theme="dark"] {
-  --feature:    #b49ce8;
-  --feature-bg: #221c30;
-  --feature-line: #3b3054;
-}
+   It used to carry its own purple. That read as a category — a *kind* of pack,
+   something with different rules — when all it means is "start here". Emphasis
+   in the existing ink does the same job without inventing a colour whose
+   meaning a reader then has to work out. */
 
 .pack.featured {
-  background: var(--feature-bg);
-  border-color: var(--feature-line);
+  background: var(--panel);
+  border-color: var(--ink-3);
 }
-.pack.featured:hover { border-color: var(--feature); }
-.pack.featured .name { color: var(--feature); }
+.pack.featured:hover { border-color: var(--ink-2); }
+.pack.featured .name { color: var(--ink); font-weight: 650; }
 
 .pack .name { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
@@ -575,9 +568,9 @@ details.group > summary:focus-visible { outline: 2px solid var(--accent); outlin
   font-weight: 600;
   letter-spacing: .08em;
   text-transform: uppercase;
-  color: var(--feature);
-  border: 1px solid var(--feature-line);
-  background: var(--panel);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
   border-radius: 999px;
   padding: 2px 8px;
   white-space: nowrap;

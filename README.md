@@ -1,6 +1,6 @@
 # synthetic-data-designer
 
-**Generate loan portfolios where you know the best score any model could achieve —
+**Generate loan portfolios where the maximum achievable model score is computable —
 then measure your model against it.**
 
 A credit model scores **0.84** on a lender's book. Is that good? Nobody knows. Real
@@ -29,7 +29,25 @@ rather than a number floating free. That is the difference between a synthetic
 dataset and a **measuring instrument**, and it is what real data structurally cannot
 give you.
 
-**[→ The 60-second demo](notebooks/known_ceiling.ipynb)** · **[how it works](docs/KNOWN-CEILING.md)**
+**Stated precisely**, because the claim is only worth making if it survives scrutiny:
+the ceiling is *the theoretical maximum predictive performance achievable from the
+declared observable variables, under this benchmark's data-generating process, for
+this outcome and metric.* It is not a universal bound, and a model beating it means
+the ceiling is wrong or the model saw something it should not have — which is why
+that case is reported rather than celebrated.
+
+### ▶ Start here — the worked example
+
+**[`notebooks/known_ceiling.ipynb`](notebooks/known_ceiling.ipynb)** — a credit-risk
+benchmark, end to end, in about a minute on a laptop.
+
+It generates a consumer loan portfolio with a hidden risk driver, walks through the
+YAML that produced it line by line, computes the ceiling, scores three models against
+it, and then **deliberately cheats** to show the instrument catching a model that
+looks excellent and is not.
+
+No GPU, no API keys, nothing to sign. Outputs are committed, so you can read it
+without running it. Further reading: **[how the ceiling works](docs/KNOWN-CEILING.md)**.
 
 ### What that buys you
 
@@ -49,6 +67,35 @@ made by rules we wrote, and a model that excels at recovering them has recovered
 rules*. What transfers is whether a model extracts available signal and whether an
 evaluation process is sound — not predicted performance.
 
+### Where this sits
+
+SDD is a **standalone utility**. It generates portfolios, ages them, validates them
+and — for benchmark packs — computes the ceiling. Nothing else is required to use any
+of that, and it has no runtime dependency on any other product.
+
+It is also the controlled-conditions half of a larger picture:
+
+```
+   SDD                                     a real portfolio
+   the answer is known                     the answer is unknown
+        │                                        │
+        │  can the model, and the process        │  what can we establish
+        │  that validates it, recover a          │  about the actual model?
+        │  truth we planted?                     │
+        └────────────────────┬───────────────────┘
+                             ▼
+                   validation and evidence
+                    (finevals.ai)
+```
+
+The distinction is the useful part. A synthetic benchmark cannot tell you a model
+will work on a bank's book. It *can* tell you whether the model extracts the signal
+that is there, and whether your validation machinery detects a problem you planted on
+purpose — which is worth establishing **before** pointing that machinery at a real
+portfolio, where nobody knows the answer.
+
+You can use SDD on its own and never touch the rest.
+
 ---
 
 ## And the generator underneath
@@ -61,11 +108,9 @@ class — residential mortgages, auto leases, SME facilities, CRE — and it pro
 coherent **panel**: the same loans observed period after period, paying down,
 falling behind, prepaying, defaulting.
 
-Generalised from
-[`Algoritmica-ai/deeploans/synthetic-data-designer`](https://github.com/Algoritmica-ai/deeploans/tree/main/synthetic-data-designer),
-which did this for one Dutch RMBS deal with every fact hardcoded in Python. Here
-every one of those facts lives in an editable spec file, and a profiler can write
-that spec for you by reading your data.
+Generalised from an earlier generator that did this for one Dutch RMBS deal with
+every fact hardcoded in Python. Here every one of those facts lives in an editable
+spec file, and a profiler can write that spec for you by reading your data.
 
 ---
 
@@ -509,5 +554,5 @@ Honest scope notes:
 
 ## Licence
 
-Apache 2.0, matching upstream deeploans. See [`NOTICE`](NOTICE) for attribution of
-the residential-mortgage domain calibration and the ESMA taxonomy fixture.
+Apache 2.0. See [`NOTICE`](NOTICE) for attribution of the residential-mortgage domain
+calibration and the ESMA taxonomy fixture.

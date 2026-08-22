@@ -37,7 +37,7 @@ meta:
   title: Credit Benchmark — Known Ceiling
   asset_class: consumer_unsecured
   entity_noun: loan
-  display_order: 2
+  display_order: 1
   featured: true
   description: >-
     A consumer loan panel with a hidden risk driver, built so the best
