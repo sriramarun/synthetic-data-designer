@@ -60,6 +60,18 @@ ORACLE_ROWS = 40_000
 # gap is always reported, so a reader can judge a marginal case themselves.
 CEILING_TOLERANCE = 0.005
 
+# How far a model's average output may swing across a column that carries no
+# signal, in standard deviations of its own score, before it counts as leaning
+# on noise. Loose enough to survive ordinary sampling wobble on a few thousand
+# rows, tight enough that a model genuinely reading the decoy shows up.
+IRRELEVANT_SWING = 0.15
+
+# The same question for a continuous decoy, where group means do not apply.
+IRRELEVANT_CORRELATION = 0.10
+
+# Above this many distinct values a decoy is treated as continuous.
+MAX_DECOY_CATEGORIES = 20
+
 
 class BenchmarkError(ValueError):
     """The spec does not describe an invertible generating process."""
@@ -190,6 +202,179 @@ def ceiling(
     )
 
 
+def metrics(labels: pd.Series, scores: pd.Series, wanted: list[str]) -> dict[str, float]:
+    """The declared measurements, computed the same way for every model.
+
+    ROC-AUC alone is the usual mistake in credit. Defaults are rare, so a model
+    can rank well and be useless for pricing — `pr_auc` says whether it finds
+    the rare bad ones, and `brier` and `calibration_error` say whether a
+    predicted 3% happens 3% of the time. A lender needs the second kind.
+    """
+    from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
+
+    y = labels.to_numpy()
+    p = pd.to_numeric(scores, errors="coerce").to_numpy(dtype=float)
+    probabilistic = bool(np.nanmin(p) >= 0.0 and np.nanmax(p) <= 1.0)
+
+    out: dict[str, float] = {}
+    for name in wanted:
+        if name == "roc_auc":
+            out[name] = float(roc_auc_score(y, p))
+        elif name == "pr_auc":
+            out[name] = float(average_precision_score(y, p))
+        elif name == "ks":
+            out[name] = _ks(y, p)
+        elif name in ("brier", "calibration_error"):
+            # Both read the score as a probability. A ranking model emits
+            # anything at all, and scoring 0-to-1000 against a 0-to-1 outcome
+            # would report a terrible Brier for a model that was never claiming
+            # to be calibrated. Reported as nan rather than as a bad number.
+            if not probabilistic:
+                out[name] = float("nan")
+            elif name == "brier":
+                out[name] = float(brier_score_loss(y, p))
+            else:
+                out[name] = _calibration_error(y, p)
+    return out
+
+
+def _ks(y: np.ndarray, p: np.ndarray) -> float:
+    """Largest gap between the score distributions of good and bad."""
+    from scipy.stats import ks_2samp
+
+    bad, good = p[y == 1], p[y == 0]
+    if not len(bad) or not len(good):
+        return float("nan")
+    return float(ks_2samp(bad, good).statistic)
+
+
+def _calibration_error(y: np.ndarray, p: np.ndarray, bins: int = 10) -> float:
+    """Largest gap between predicted and observed rate, over equal-count bins.
+
+    The maximum rather than the average: a model that is badly wrong for the
+    riskiest decile and fine everywhere else is badly wrong, and averaging hides
+    exactly the segment a lender prices on.
+    """
+    order = np.argsort(p)
+    worst = 0.0
+    for chunk in np.array_split(order, bins):
+        if len(chunk) < 2:
+            continue
+        worst = max(worst, abs(float(p[chunk].mean()) - float(y[chunk].mean())))
+    return worst
+
+
+def check_behaviour(
+    spec: DesignSpec,
+    panel: pd.DataFrame,
+    labels: pd.Series,
+    scores: pd.Series,
+) -> list[dict[str, Any]]:
+    """Mark a model against what the spec said a correct one would look like.
+
+    Judged from the scores and the data alone, never from the fitted object, so
+    the same checks apply to a scorecard, a gradient booster, a foundation model
+    or a CSV a vendor emailed over.
+    """
+    expected = _bench(spec).expected_behaviour
+    seen = observables(spec, panel).reindex(labels.index)
+    aligned = scores.reindex(labels.index)
+    results: list[dict[str, Any]] = []
+
+    # 1. Did it learn each driver the right way round?
+    #
+    # A model can score well overall while having one relationship inverted, and
+    # that is invisible in an AUC. Measured as rank correlation between the
+    # feature and the model's own output, so it reports what the model believes
+    # rather than what is true in the data.
+    for column, direction in expected.directionality.items():
+        if column not in seen.columns:
+            continue
+        rho = float(pd.Series(seen[column]).corr(aligned, method="spearman"))
+        wanted = 1.0 if direction == "increasing_risk" else -1.0
+        results.append(
+            {
+                "check": "directionality",
+                "subject": column,
+                "expected": direction,
+                "observed": round(rho, 4),
+                "passed": bool(rho * wanted > 0),
+                "detail": f"model score moves {'with' if rho > 0 else 'against'} {column}",
+            }
+        )
+
+    # 2. Did it lean on something that carries nothing?
+    #
+    # These columns are noise by construction. Measured as how far the model's
+    # average score shifts across their values, relative to its own spread — a
+    # model ignoring a decoy scores every group alike. Read off the scores, so
+    # no access to the model is needed.
+    spread = float(aligned.std()) or 1.0
+    for column in expected.irrelevant_features:
+        if column not in panel.columns:
+            continue
+        values = observables_extra(spec, panel, column).reindex(labels.index)
+        measure = _decoy_influence(values, aligned, spread)
+        if measure is None:
+            continue
+        statistic, observed, limit = measure
+        results.append(
+            {
+                "check": "irrelevant_feature",
+                "subject": column,
+                "expected": "no influence",
+                "observed": round(observed, 4),
+                "passed": bool(observed < limit),
+                "detail": f"{statistic} of {observed:.2f} against a limit of {limit}; "
+                f"{column} carries no signal by construction",
+            }
+        )
+    return results
+
+
+def _decoy_influence(
+    values: pd.Series, scores: pd.Series, spread: float
+) -> tuple[str, float, float] | None:
+    """How much a model's output moves with a column that means nothing.
+
+    Two measures, because one does not fit both shapes — and using the wrong one
+    reports a failure that is not there. Grouping a *continuous* decoy gives one
+    group per row, so the "swing between groups" becomes the full range of the
+    model's output and every model fails. That happened here on
+    `current_balance`, at 4.4 standard deviations, on a model that was not using
+    it at all.
+
+    So: a handful of categories are compared by group means, and a continuous
+    column by rank correlation. Both answer "does the output track this?", which
+    is the actual question.
+    """
+    clean = pd.to_numeric(values, errors="coerce")
+    numeric = clean.notna().all() and values.nunique() > MAX_DECOY_CATEGORIES
+
+    if numeric:
+        rho = float(clean.corr(scores, method="spearman"))
+        return "rank correlation", abs(rho), IRRELEVANT_CORRELATION
+
+    by_value = scores.groupby(values).mean()
+    if len(by_value) < 2:
+        return None
+    swing = float(by_value.max() - by_value.min()) / spread
+    return "swing between groups, in standard deviations", swing, IRRELEVANT_SWING
+
+
+def observables_extra(spec: DesignSpec, panel: pd.DataFrame, column: str) -> pd.Series:
+    """Any column at the opening cut-off, indexed like the labels.
+
+    Separate from `observables()` because a decoy is not something a model is
+    *meant* to use — it is read here only to check whether the model used it.
+    """
+    id_column, time_column = spec.entity.id_column, spec.entity.time_column
+    opening = panel[panel[time_column] == panel[time_column].min()]
+    series = opening.set_index(id_column)[column].sort_index()
+    series.index = _plain_index(series.index, id_column)
+    return series
+
+
 def compare(
     spec: str | Path | dict[str, Any] | DesignSpec,
     panel: pd.DataFrame,
@@ -198,7 +383,7 @@ def compare(
     name: str = "model",
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Score a model against the ceiling, and say what the number means.
+    """Score a model against the ceiling, and mark it against what was declared.
 
     ``model_scores`` is indexed by entity, higher meaning more likely to go bad.
 
@@ -214,7 +399,10 @@ def compare(
     """
     from sklearn.metrics import roc_auc_score
 
-    result = ceiling(spec, panel, **kwargs)
+    loaded = spec if isinstance(spec, DesignSpec) else _load(spec)
+    bench = _bench(loaded)
+    result = ceiling(loaded, panel, **kwargs)
+
     aligned = model_scores.reindex(result.labels.index)
     if aligned.isna().any():
         raise BenchmarkError(
@@ -224,15 +412,49 @@ def compare(
 
     achieved = float(roc_auc_score(result.labels, aligned))
     span = result.ceiling - 0.5
+    captured = (achieved - 0.5) / span if span > 0 else float("nan")
+
+    measured = metrics(result.labels, aligned, list(bench.evaluation.metrics))
+    behaviour = check_behaviour(loaded, panel, result.labels, aligned)
+
+    expected = bench.expected_behaviour
+    if expected.min_signal_captured is not None:
+        behaviour.append(
+            {
+                "check": "signal_captured",
+                "subject": bench.evaluation.primary,
+                "expected": f">= {expected.min_signal_captured:.0%}",
+                "observed": round(captured, 4),
+                "passed": bool(captured >= expected.min_signal_captured),
+                "detail": "share of the available signal the model found",
+            }
+        )
+    error = measured.get("calibration_error")
+    if expected.max_calibration_error is not None and error is not None and not np.isnan(error):
+        behaviour.append(
+            {
+                "check": "calibration",
+                "subject": "predicted vs observed rate",
+                "expected": f"<= {expected.max_calibration_error}",
+                "observed": round(error, 4),
+                "passed": bool(error <= expected.max_calibration_error),
+                "detail": "largest gap in any decile of predicted risk",
+            }
+        )
+
+    beat = achieved > result.ceiling + CEILING_TOLERANCE
     return {
         "name": name,
         "achieved": achieved,
         "ceiling": result.ceiling,
         "oracle": result.oracle,
-        "captured": (achieved - 0.5) / span if span > 0 else float("nan"),
+        "captured": captured,
         "gap_to_ceiling": result.ceiling - achieved,
-        "beat_the_ceiling": achieved > result.ceiling + CEILING_TOLERANCE,
+        "beat_the_ceiling": beat,
         "outcome_rate": result.outcome_rate,
+        "metrics": measured,
+        "behaviour": behaviour,
+        "passed": bool(not beat and all(c["passed"] for c in behaviour)),
     }
 
 

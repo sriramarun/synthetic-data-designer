@@ -17,6 +17,7 @@ import copy
 import pathlib
 import tempfile
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -253,3 +254,164 @@ def test_a_missing_centre_is_refused(generated):
 
     with pytest.raises(benchmark.BenchmarkError, match="centres for"):
         benchmark.ceiling(broken, panel)
+
+
+# ---------------------------------------------------------------------------
+# the mark scheme: evaluation + expected_behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_the_mark_scheme_changes_no_data(tmp_path):
+    """The claim that matters most, because it is the one that sounds wrong.
+
+    `evaluation` and `expected_behaviour` describe how a *model* should be
+    judged. They say nothing about generation, and a panel produced with them is
+    identical to one produced without — same seed, same rows, same values.
+
+    Checked by hashing both, because "it should not change anything" is exactly
+    the sort of claim that quietly stops being true.
+    """
+    import hashlib
+
+    spec = api.load(PACK).model_dump(mode="json", exclude_none=True, by_alias=True)
+    stripped = copy.deepcopy(spec)
+    stripped["benchmark"].pop("expected_behaviour", None)
+    stripped["benchmark"].pop("evaluation", None)
+
+    def digest(variant, tag):
+        result = api.run(variant, 4_000, tmp_path / tag, seed=42, validate_output=False)
+        frame = pd.read_parquet(result["panel"])
+        return hashlib.sha256(
+            pd.util.hash_pandas_object(frame, index=False).values.tobytes()
+        ).hexdigest()
+
+    assert digest(spec, "with") == digest(stripped, "without")
+
+
+def test_the_declared_metrics_are_all_computed(generated):
+    """Whatever the pack lists is what gets reported, and nothing silently drops."""
+    spec, panel = generated
+    labels = benchmark.label_outcome(spec, panel)
+    features = benchmark.observables(spec, panel)
+    scores = pd.Series(1.0 - features["bureau_score"].rank(pct=True), index=features.index)
+
+    report = benchmark.compare(spec, panel, scores, name="ranker")
+    assert set(report["metrics"]) == set(spec.benchmark.evaluation.metrics)
+    assert 0.5 < report["metrics"]["roc_auc"] < 1.0
+    assert 0.0 < report["metrics"]["pr_auc"] <= 1.0
+    assert 0.0 < report["metrics"]["ks"] <= 1.0
+    assert labels.sum() > 0
+
+
+def test_a_ranking_score_reports_no_brier(generated):
+    """A model emitting 0-to-1000 is not claiming to be calibrated.
+
+    Scoring it against a 0/1 outcome would report a terrible Brier for a model
+    that never promised one, so those two come back as nan rather than as a bad
+    number someone would quote.
+    """
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    raw = pd.Series(-features["bureau_score"].to_numpy(), index=features.index)
+
+    report = benchmark.compare(spec, panel, raw, name="unscaled")
+    assert np.isnan(report["metrics"]["brier"])
+    assert np.isnan(report["metrics"]["calibration_error"])
+    assert report["metrics"]["roc_auc"] > 0.5
+
+
+def test_an_honest_model_passes_every_check(generated):
+    """The control in the other direction. A mark scheme that fails everything
+    is as useless as one that passes everything."""
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    honest = pd.Series(-features["bureau_score"].to_numpy(), index=features.index)
+
+    report = benchmark.compare(spec, panel, honest, name="honest")
+    assert report["passed"], [c for c in report["behaviour"] if not c["passed"]]
+
+
+def test_a_backwards_relationship_is_caught(generated):
+    """A model can score respectably with one driver inverted, and an AUC will
+    never show it. This is the check that does."""
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    inverted = pd.Series(features["bureau_score"].to_numpy(), index=features.index)
+
+    report = benchmark.compare(spec, panel, inverted, name="inverted")
+    failed = {c["subject"] for c in report["behaviour"] if not c["passed"]}
+    assert "bureau_score" in failed
+    assert not report["passed"]
+
+
+def test_leaning_on_a_categorical_decoy_is_caught(generated):
+    """`region` is noise by construction, so a model whose output tracks it has
+    found something that is not there."""
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    region = benchmark.observables_extra(spec, panel, "region").reindex(features.index)
+    superstitious = pd.Series((region == "North").astype(float).to_numpy(), index=features.index)
+
+    report = benchmark.compare(spec, panel, superstitious, name="region-reader")
+    failed = {c["subject"] for c in report["behaviour"] if not c["passed"]}
+    assert "region" in failed
+
+
+def test_leaning_on_a_continuous_decoy_is_caught(generated):
+    """The same question for `current_balance`, which needs a different measure.
+
+    Grouping a continuous column gives one group per row, so a swing-between-
+    groups test reports the model's whole output range and fails everything.
+    That happened: a model ignoring `current_balance` entirely scored 4.4
+    standard deviations of apparent influence. Rank correlation is the measure
+    that fits the shape.
+    """
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    balance = benchmark.observables_extra(spec, panel, "current_balance")
+    tracks_it = pd.Series(
+        balance.reindex(features.index).to_numpy(dtype=float), index=features.index
+    )
+
+    report = benchmark.compare(spec, panel, tracks_it, name="balance-reader")
+    failed = {c["subject"] for c in report["behaviour"] if not c["passed"]}
+    assert "current_balance" in failed
+
+    honest = pd.Series(-features["bureau_score"].to_numpy(), index=features.index)
+    clean = benchmark.compare(spec, panel, honest, name="honest")
+    balance_check = next(c for c in clean["behaviour"] if c["subject"] == "current_balance")
+    assert balance_check["passed"], (
+        f"a model ignoring the decoy was flagged anyway: {balance_check}"
+    )
+
+
+def test_too_little_signal_is_caught(generated):
+    """`min_signal_captured` is a bar in units that compare across datasets.
+
+    A raw AUC cannot be compared between portfolios with different ceilings;
+    share-of-available-signal can, which is why the bar is set in those terms.
+    """
+    spec, panel = generated
+    features = benchmark.observables(spec, panel)
+    rng = np.random.default_rng(0)
+    weak = pd.Series(
+        -features["bureau_score"].to_numpy() + rng.normal(0, 300, len(features)),
+        index=features.index,
+    )
+
+    report = benchmark.compare(spec, panel, weak, name="weak")
+    captured = next(c for c in report["behaviour"] if c["check"] == "signal_captured")
+    assert not captured["passed"]
+    assert report["captured"] < spec.benchmark.expected_behaviour.min_signal_captured
+
+
+def test_the_primary_metric_must_have_a_ceiling():
+    """A Brier score cannot be compared against a ranking bound, so the spec
+    refuses one as primary rather than reporting a meaningless comparison."""
+    from sdd.spec.schema import Evaluation
+
+    with pytest.raises(ValueError, match="cannot be the primary metric"):
+        Evaluation(metrics=["roc_auc", "brier"], primary="brier")
+
+    with pytest.raises(ValueError, match="not in `metrics`"):
+        Evaluation(metrics=["roc_auc"], primary="pr_auc")

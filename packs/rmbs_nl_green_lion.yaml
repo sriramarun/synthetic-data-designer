@@ -12,14 +12,14 @@ spec_version: 1
 meta:
   name: green_lion
   entity_noun: loan
-  display_order: 2
+  display_order: 3
   title: Dutch Green Loans — Residential Mortgages
   asset_class: rmbs
   regulatory_template: ESMA Annex 2 — Underlying exposures, residential real estate
   description: >-
     Dutch prime residential mortgages as a monthly panel. Zero LLM calls: every
     column is a sampler or a deterministic derivation.
-  source: Algoritmica-ai/deeploans synthetic-data-designer
+  source: an upstream Dutch RMBS generator, generalised into this spec model
 
 entity:
   id_column: loan_id

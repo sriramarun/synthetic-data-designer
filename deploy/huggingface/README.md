@@ -103,5 +103,4 @@ Run it locally for anything bigger. There are no limits there.
 - **Exports** CSV, Parquet, Excel, the configuration as YAML, and a standalone
   validation report
 
-Apache 2.0. Generalised from
-[Algoritmica-ai/deeploans](https://github.com/Algoritmica-ai/deeploans).
+Apache 2.0.

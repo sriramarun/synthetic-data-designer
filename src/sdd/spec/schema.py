@@ -1369,6 +1369,101 @@ class BenchmarkObservable(_Base):
     )
 
 
+Direction = Literal["increasing_risk", "decreasing_risk"]
+
+MetricName = Literal[
+    "roc_auc",  # ranking: can it tell good from bad at all
+    "pr_auc",  # ranking under rarity, which is where credit lives
+    "ks",  # the largest separation between the two distributions
+    "brier",  # probability quality, not just order
+    "calibration_error",  # does a predicted 3% happen 3% of the time
+]
+
+
+class ExpectedBehaviour(_Base):
+    """What a model that learned correctly should look like.
+
+    Everything else in a spec says how to *make* the data. This says what should
+    be **true of a model** that has learned from it — and it is the difference
+    between a dataset and a test with a mark scheme.
+
+    The point is that these are written down *before* anyone runs a model.
+    Judged afterwards, "the model uses sensible drivers" is a conversation.
+    Declared here, it is a check that passes or fails, and it cannot be
+    renegotiated once someone has seen the score they got.
+
+    None of it changes a single generated row. The data is identical with this
+    block or without it; what changes is whether the result can be marked.
+    """
+
+    directionality: dict[str, Direction] = Field(
+        default_factory=dict,
+        description="Observable -> the direction risk should move in. A model that ranks "
+        "high-DTI borrowers as safer has learned something backwards, and will keep scoring "
+        "well on aggregate while doing it.",
+    )
+    irrelevant_features: list[str] = Field(
+        default_factory=list,
+        description="Columns carrying no signal by construction. A model whose output varies "
+        "with one of these has found noise — visible here because the generator knows they "
+        "are noise, and invisible on a real portfolio where nobody does.",
+    )
+    min_signal_captured: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How much of the available signal a model must find to pass, as a share "
+        "of the ceiling above chance. Absolute scores cannot be compared across datasets "
+        "with different ceilings; this can.",
+    )
+    max_calibration_error: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="Largest acceptable gap between predicted and observed rates. Only "
+        "meaningful for a model emitting probabilities rather than ranks.",
+    )
+
+
+class Evaluation(_Base):
+    """Which measurements decide whether a model passed.
+
+    Declaring the metric list turns a benchmark from a description into a
+    contract: everyone is judged on the same figures, chosen before the results
+    were seen rather than after.
+
+    ROC-AUC alone is the usual mistake in credit. Defaults are rare, so a model
+    can rank well and still be useless for pricing — `pr_auc` says whether it
+    finds the rare bad ones and `calibration_error` says whether a predicted 3%
+    actually happens 3% of the time. A lender needs both.
+    """
+
+    metrics: list[MetricName] = Field(
+        default_factory=lambda: ["roc_auc"],
+        description="Metrics computed for every model scored against this benchmark.",
+    )
+    primary: MetricName = Field(
+        default="roc_auc",
+        description="The one compared against the ceiling. Only ranking metrics have a "
+        "ceiling, so this must be one of those.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> Evaluation:
+        if not self.metrics:
+            raise ValueError("evaluation declares no metrics, so nothing would be measured")
+        if self.primary not in self.metrics:
+            raise ValueError(
+                f"the primary metric {self.primary!r} is not in `metrics` {self.metrics}; "
+                "the figure a model is judged on has to be one of the figures computed"
+            )
+        if self.primary not in ("roc_auc", "pr_auc", "ks"):
+            raise ValueError(
+                f"{self.primary!r} cannot be the primary metric: the ceiling is a ranking "
+                "bound, and comparing a Brier score against it would be meaningless"
+            )
+        return self
+
+
 class Benchmark(_Base):
     """How to compute the best score any model could achieve on this data.
 
@@ -1412,6 +1507,15 @@ class Benchmark(_Base):
         default_factory=list,
         description="Lifecycle states that count as the bad outcome. An entity reaching any "
         "of them at any cut-off is labelled 1.",
+    )
+    evaluation: Evaluation = Field(
+        default_factory=Evaluation,
+        description="Which measurements decide whether a model passed.",
+    )
+    expected_behaviour: ExpectedBehaviour = Field(
+        default_factory=ExpectedBehaviour,
+        description="What a model that learned correctly should look like, declared before "
+        "anyone runs one.",
     )
 
     @model_validator(mode="after")

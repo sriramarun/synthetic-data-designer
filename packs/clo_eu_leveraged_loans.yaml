@@ -37,8 +37,8 @@ spec_version: 1
 meta:
   name: clo_eu_leveraged_loans
   entity_noun: facility
-  display_order: 1
-  featured: true
+  display_order: 2
+  featured: false
   title: European CLO — Leveraged Loans
   asset_class: clo
   regulatory_template: none — portfolio analytics, not a disclosure template
