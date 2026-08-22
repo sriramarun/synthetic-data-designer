@@ -61,6 +61,83 @@ would eventually disagree with the first.
 Being **derived rather than estimated** is the point. An approximated ceiling is one
 more number to argue about, and the purpose here is to end an argument.
 
+## Where the calculation happens
+
+Everything lives in [`src/sdd/benchmark.py`](../src/sdd/benchmark.py). Nothing about
+the ceiling touches the generator — it reads a finished panel and the spec that made
+it.
+
+```
+ packs/credit_benchmark_known_ceiling.yaml
+ │   the declared generating process: hidden tier, three noisy
+ │   readings, the arrears ladder, what counts as "bad"
+ ▼
+ api.run(...)                                          the ordinary generator
+ │
+ ├──► panel.parquet          144,000 rows   (8,000 entities × 18 cut-offs)
+ │                                           risk_tier NOT in it
+ │
+ ▼
+ ══════════════════ benchmark.ceiling(spec, panel) ══════════════════
+ │
+ │  ┌─ observables()                            → 8,000 × 3
+ │  │    opening cut-off only, declared columns only.
+ │  │    One row per BORROWER, not per panel row: a score is
+ │  │    made at a point in time, and later cut-offs would
+ │  │    leak the answer.
+ │  │
+ │  ├─ label_outcome()                          → 8,000
+ │  │    did this borrower EVER reach 60-89 DPD or Defaulted,
+ │  │    at any cut-off? Read across the whole panel.
+ │  │
+ │  ├─ _latent_risk()      ── runs the generator a second time,
+ │  │                         with the tier exposed ──────────► P(bad | tier)
+ │  │                                                            5 numbers
+ │  │
+ │  ├─ _posterior()                              → 8,000 × 5
+ │  │    Bayes: P(tier | the three readings), for every
+ │  │    borrower and every tier, in one matrix operation
+ │  │
+ │  └─ scores = posterior @ P(bad | tier)        → 8,000
+ │       each borrower's best-possible risk estimate
+ │
+ ▼
+ CEILING = roc_auc(labels, scores)          one number, over all 8,000
+ ORACLE  = roc_auc from the exposed run     one number
+ ═════════════════════════════════════════════════════════════════════
+ │
+ ▼
+ benchmark.compare(spec, panel, your_scores)
+ │    achieved · captured · five metrics · behaviour checks · passed
+ ▼
+ a verdict
+```
+
+### Per row, or all at once?
+
+Both, at different stages — and the distinction matters for reading the code.
+
+| stage | shape | per what |
+|---|---|---|
+| the readings | 8,000 × 3 | **one row per borrower** — the opening cut-off only |
+| P(bad \| tier) | 5 | per *tier*, not per borrower |
+| the posterior | 8,000 × 5 | per borrower **and** per tier |
+| the risk score | 8,000 | one per borrower |
+| **the ceiling** | 1 | **one number over the whole population** |
+
+So each borrower gets their own posterior and their own score — but computed as one
+vectorised matrix operation, not a loop. The log-posterior is accumulated in logs
+across the three readings and normalised per row, which is a single
+`(8000, 5)` array from start to finish.
+
+The **ceiling itself is not per row.** It is an AUC, and an AUC is a property of a
+whole population: it asks how often a bad borrower is ranked above a good one, across
+every pair. One borrower has no AUC.
+
+That is also why a model must be scored **out of sample** to be compared against it.
+The ceiling is a population quantity; a score measured on rows the model memorised is
+not the same quantity.
+
 ## Using it
 
 ```python
