@@ -143,6 +143,19 @@ main { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .rail .step .s b { font-weight: 570; font-size: 13px; }
 .rail .step .s i { font-style: normal; font-size: 11px; color: var(--ink-3); }
 
+/* The source link sits under the flow rather than in it. Quieter than a step,
+   and behind a rule, so the numbered sequence still reads as six things and not
+   as seven with an odd one at the end. */
+.rail-link {
+  display: flex; align-items: center; gap: 9px;
+  margin-top: 10px; padding: 9px 11px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-3); text-decoration: none;
+  font-size: 12px;
+}
+.rail-link:hover { color: var(--ink); }
+.rail-link svg { flex: none; opacity: .85; }
+
 /* --------------------------------------------------------------- headings */
 
 .head h1 { font-size: 21px; letter-spacing: -.015em; margin: 2px 0 5px; }
