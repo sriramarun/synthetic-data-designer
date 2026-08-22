@@ -275,3 +275,38 @@ benchmark:
     - {column: revolving_utilisation_pct, centres: _centre_util, noise: _noise_util}
     - {column: debt_to_income_pct, centres: _centre_dti, noise: _noise_dti}
   label_states: ["60-89 DPD", Defaulted]
+
+  # Which measurements decide whether a model passed. Declared here so every
+  # model is judged on the same figures, chosen before anyone saw a result.
+  #
+  # ROC-AUC alone is the usual mistake in credit. Defaults are rare, so a model
+  # can rank well and still be useless for pricing: `pr_auc` says whether it
+  # finds the rare bad ones, and `calibration_error` says whether a predicted 3%
+  # actually happens 3% of the time.
+  evaluation:
+    metrics: [roc_auc, pr_auc, ks, brier, calibration_error]
+    primary: roc_auc
+
+  # What a model that learned correctly looks like — written down before anyone
+  # runs one. Judged afterwards, "the model uses sensible drivers" is a
+  # conversation; declared here it is a check that passes or fails and cannot be
+  # renegotiated once someone has seen their score.
+  #
+  # None of this changes a generated row. The data is identical with this block
+  # or without it. What changes is whether a result can be marked.
+  expected_behaviour:
+    # Which way each driver should push. A model can score well overall with one
+    # relationship inverted, and an AUC will never show it.
+    directionality:
+      bureau_score: decreasing_risk
+      revolving_utilisation_pct: increasing_risk
+      debt_to_income_pct: increasing_risk
+
+    # Noise by construction. A model whose output moves with either has found
+    # something that is not there — visible only because the generator knows
+    # they are noise, which on a real portfolio nobody does.
+    irrelevant_features: [region, current_balance]
+
+    # Share of the *available* signal, not a raw score. Absolute AUCs cannot be
+    # compared across datasets with different ceilings; this can.
+    min_signal_captured: 0.85
