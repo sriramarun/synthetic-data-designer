@@ -63,7 +63,7 @@ is temporary — it is wiped whenever the Space restarts or goes to sleep.
 The tool is designed to run locally, where nothing leaves your machine:
 
 ```bash
-pip install 'sdd[web]'
+pip install 'synthetic-data-designer[web] @ git+https://github.com/sriramarun/synthetic-data-designer'
 sdd ui
 ```
 

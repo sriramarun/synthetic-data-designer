@@ -729,7 +729,7 @@ are written to be actionable — *"transition matrix row 0 ('Performing') sums t
 plumbing reaches you.
 
 **A method is greyed out.** Sampling needs a sample; CTGAN and Hybrid need a
-sample *and* `pip install 'sdd[deep]'`.
+sample *and* `pip install '.[deep]'`.
 
 **The missing-values slider does nothing.** Every column is marked required. Go
 back to Review and untick Required on the columns that may be blank.
