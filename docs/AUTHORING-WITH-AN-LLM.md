@@ -337,3 +337,7 @@ The shipped packs are the best reference, and each was written from real documen
 Read `packs/clo_eu_leveraged_loans.yaml` alongside this guide. It is heavily
 commented, and the comments explain *why* each number is what it is — which is the
 habit worth copying.
+
+And [`reference_spec.yaml`](reference_spec.yaml) shows **every option in one runnable
+file** — every generator kind, hazard kind, derivation kind, metric and chart. Use it
+to answer "what can go here?"; use the packs to answer "what should go here?".

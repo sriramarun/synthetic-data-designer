@@ -33,6 +33,7 @@ from pydantic_core import PydanticUndefined
 import sdd.spec.schema as schema
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "SPEC-REFERENCE.md"
+SAMPLE = Path(__file__).resolve().parents[1] / "docs" / "reference_spec.yaml"
 
 # The order a reader meets things, which is not the order python defines them.
 TOP_LEVEL = "DesignSpec"
@@ -183,8 +184,34 @@ def build() -> str:
         "## Contents",
         "",
     ]
+    head += ["- [A spec using every option](#a-spec-using-every-option)"]
     head += [f"- [{m.__name__}](#{m.__name__.lower()})" for m in models]
     head += ["", "---", ""]
+
+    # The sample is embedded rather than linked. A field table tells you what a
+    # field is called; only a worked document tells you what a spec looks like,
+    # and the two belong on the same page.
+    head += [
+        "## A spec using every option",
+        "",
+        "Every block, every generator kind, every hazard kind, every derivation kind, "
+        "every metric and every chart, in one file. **It runs** — "
+        "`tests/test_reference_spec.py` generates from it, checks the invariants pass, "
+        "and fails if a new option is added to the schema and not shown here.",
+        "",
+        "Not a calibrated pack, and not a recommendation: some of it is deliberately "
+        "odd because the point is coverage rather than realism. For sensible examples "
+        "read the packs.",
+        "",
+        f"Source: [`{SAMPLE.name}`]({SAMPLE.name}).",
+        "",
+        "```yaml",
+        SAMPLE.read_text(encoding="utf-8").rstrip(),
+        "```",
+        "",
+        "---",
+        "",
+    ]
 
     body: list[str] = []
     for model in models:

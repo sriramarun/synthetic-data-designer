@@ -67,9 +67,10 @@ a failure rather than a result.
 
 **New to any of this?** [`docs/WHAT-IS-SDD.md`](docs/WHAT-IS-SDD.md) explains the
 whole tool from zero — no jargon without a definition, no finance background assumed.
-Every field of the spec is in [`docs/SPEC-REFERENCE.md`](docs/SPEC-REFERENCE.md), and
-[`docs/AUTHORING-WITH-AN-LLM.md`](docs/AUTHORING-WITH-AN-LLM.md) is a procedure for
-turning a prospectus into one.
+Every field of the spec is in [`docs/SPEC-REFERENCE.md`](docs/SPEC-REFERENCE.md) —
+including [`reference_spec.yaml`](docs/reference_spec.yaml), a runnable file showing
+every option in one place — and [`docs/AUTHORING-WITH-AN-LLM.md`](docs/AUTHORING-WITH-AN-LLM.md)
+is a procedure for turning a prospectus into one.
 
 ### ▶ Start here — the worked example
 
