@@ -163,6 +163,51 @@ it is comparable across datasets.
 **Score out of sample.** The ceiling is a population quantity; an in-sample score is
 not comparable to it.
 
+## Scoring an LLM, or anything else
+
+`compare()` takes a pandas Series of scores indexed by entity. It never sees the
+model, so it does not care what produced them — a scorecard, a gradient booster, a
+foundation model, an LLM reading rows, or a CSV a vendor emailed over are all scored
+identically.
+
+The practical obstacle with an LLM is not the interface, it is **granularity**. Asked
+to rate a borrower, a language model returns "7 out of 10" or "medium risk", not a
+float. Coarse output means massive ties, and ties cost AUC.
+
+Measured on this benchmark, against a ceiling of 0.8996:
+
+| what the model emits | AUC | signal captured | ties |
+|---|---:|---:|---:|
+| continuous score | 0.8904 | 97.7% | 0% |
+| **1–10 integer** | **0.8857** | **96.5%** | 99.9% |
+| 1–5 integer | 0.8675 | 92.0% | 99.9% |
+| low / medium / high | 0.8282 | 82.2% | 100% |
+| binary yes / no | 0.7460 | 61.6% | 100% |
+
+**A 1–10 rating costs almost nothing** — about a point of captured signal against a
+continuous score. Three buckets costs fifteen points, and a yes/no answer throws away
+a third of what the model knew.
+
+That is worth knowing before blaming the model. An LLM scored at 82% captured on a
+three-way judgement may be extracting as much as one scored at 96% on a ten-point
+scale; the difference is the answer format, not the reasoning. **Ask for the finest
+granularity the model can give.**
+
+### What does not transfer
+
+The ceiling exists because the emission model is declared and invertible: observables
+are a latent group's centre plus Gaussian noise of stated width, so the posterior is
+exact.
+
+There is no analogous inversion for text. A benchmark for hallucination, retrieval or
+policy compliance can absolutely have a **known answer** — you planted the fact, so
+you know whether the model recalled it. It cannot have a **computable ceiling**,
+because nobody can derive what the best possible reader of a passage could score.
+
+Those are different claims and only one of them is unusual. Known-answer evals for
+LLMs are common. A computable ceiling is the part that is rare, and it does not
+survive the jump from numbers to text.
+
 ## The check that keeps it honest
 
 A ceiling is a claim, and a claim that cannot fail is worth nothing. So `compare()`
