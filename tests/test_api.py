@@ -312,5 +312,8 @@ def test_the_deep_polish_explains_how_to_install_it():
 
     from sdd.polish import DeepUnavailable, polish_book
 
-    with pytest.raises(DeepUnavailable, match=r"pip install 'sdd\[deep\]'"):
+    # The command has to be one that works. `sdd` on PyPI is an unrelated
+    # video-detection library, so the old message sent a stuck user to install
+    # someone else's package.
+    with pytest.raises(DeepUnavailable, match=r"pip install -e '\.\[deep\]'"):
         polish_book(pd.DataFrame({"a": [1]}), api.load(PACK), seed_data=pd.DataFrame({"a": [1]}))
