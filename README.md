@@ -262,7 +262,7 @@ exercises the engine differently.
 | Default → resolution | 9-month workout, then **recovery at 62%** | 9 months to write-off | 6 months, then recovery at 45% |
 | Portfolio report | 22 metrics, 6 charts | 8 metrics, 4 charts | 9 metrics, 4 charts |
 | Extras | **credit ratings migrate on their own chain**; obligor grouping; sector-specific stress | — | — |
-| Calibrated to | demo assumptions, directional only | upstream deeploans' Dutch RMBS deal | published European prime auto ABS ranges |
+| Calibrated to | demo assumptions, directional only | a real Dutch RMBS deal | published European prime auto ABS ranges |
 
 
 ### European CLO — Leveraged Loans
@@ -422,35 +422,6 @@ close that gap, in increasing cost:
 Rank correlation is monotonic by construction: it reproduces "bigger loans go with
 bigger incomes", not a curved or conditional relationship. Those still need a
 derivation or the deep model.
-
----
-
-## Parity with upstream
-
-`scripts/parity_check.py` runs upstream deeploans and this engine side by side
-and compares them. Measured at 30,000 loans x 24 cut-offs:
-
-| bar | result |
-|---|---|
-| schema | **exact** — 71 columns, identical order, identical filenames |
-| behaviour | **exact** — both panels pass all 22 invariants; surviving pool within 0.22% at every cut-off |
-| joint structure | max correlation delta 0.025 (floor 0.05) |
-| dynamics | max transition delta 0.028 (floor 0.053) |
-| marginals | 66/69 within their noise floor |
-
-```bash
-pip install data-designer
-python scripts/parity_check.py --deeploans /path/to/deeploans -n 30000
-```
-
-Byte-identical output is **not** achievable and is not claimed: NeMo Data
-Designer and numpy do not share a random number stream. The three columns that
-sit marginally over their floor are not the same three from run to run. Chased
-to the bottom, the most persistent one traces to the underlying Bernoulli draw
-landing 1.7 standard errors apart on the opening book — ordinary sampling noise,
-amplified at panel level because a loan surviving 24 cut-offs contributes 24 rows
-while one redeeming early contributes two. Demanding zero would mean tuning
-thresholds until one seed passed.
 
 ---
 
